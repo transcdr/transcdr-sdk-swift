@@ -81,6 +81,9 @@ public struct WebhookEndpoint: Codable, Hashable, Sendable, Identifiable {
     public var enabled: Bool
     /// Only present on create and rotate.
     public var secret: String?
+    /// The write-only secrets that are set, with their fingerprints: `secret`
+    /// and, for sns/sqs, `secret_access_key`.
+    public var secrets: [String: SecretFingerprint]
     public var createdAt: Date
     public var updatedAt: Date?
     public var lastDeliveryAt: Date?
@@ -89,7 +92,7 @@ public struct WebhookEndpoint: Codable, Hashable, Sendable, Identifiable {
     public var connectionId: String?
 
     enum CodingKeys: String, CodingKey {
-        case id, type, url, aws, description, events, enabled, secret
+        case id, type, url, aws, description, events, enabled, secret, secrets
         case topicArn = "topic_arn"
         case queueUrl = "queue_url"
         case createdAt = "created_at"
@@ -111,6 +114,7 @@ public struct WebhookEndpoint: Codable, Hashable, Sendable, Identifiable {
         events = try c.decodeList([String].self, forKey: .events)
         enabled = try c.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
         secret = try c.decodeIfPresent(String.self, forKey: .secret)
+        secrets = (try? c.decodeMap([String: SecretFingerprint].self, forKey: .secrets)) ?? [:]
         createdAt = try c.decode(Date.self, forKey: .createdAt)
         updatedAt = try c.decodeIfPresent(Date.self, forKey: .updatedAt)
         lastDeliveryAt = try c.decodeIfPresent(Date.self, forKey: .lastDeliveryAt)
@@ -165,7 +169,8 @@ public enum WebhookCreateParams: Encodable, Sendable {
     }
 }
 
-/// `type` cannot change after creation.
+/// `type` cannot change after creation. A field left out is kept; `clear`
+/// names fields to send as `null`, which clears them.
 public struct WebhookUpdateParams: Encodable, Sendable {
     public var url: String?
     public var topicArn: String?
@@ -174,8 +179,18 @@ public struct WebhookUpdateParams: Encodable, Sendable {
     public var events: [String]?
     public var description: String?
     public var enabled: Bool?
+    /// Fields to clear: sent as `null` unless they are also set.
+    public var clear: Set<Field>
 
-    public init(url: String? = nil, topicArn: String? = nil, queueUrl: String? = nil, aws: WebhookAwsParams? = nil, events: [String]? = nil, description: String? = nil, enabled: Bool? = nil) {
+    public enum Field: String, Hashable, Sendable, CaseIterable {
+        case description
+        /// `aws.endpoint`.
+        case awsEndpoint = "aws.endpoint"
+        /// `aws.message_group_id`.
+        case awsMessageGroupId = "aws.message_group_id"
+    }
+
+    public init(url: String? = nil, topicArn: String? = nil, queueUrl: String? = nil, aws: WebhookAwsParams? = nil, events: [String]? = nil, description: String? = nil, enabled: Bool? = nil, clear: Set<Field> = []) {
         self.url = url
         self.topicArn = topicArn
         self.queueUrl = queueUrl
@@ -183,12 +198,27 @@ public struct WebhookUpdateParams: Encodable, Sendable {
         self.events = events
         self.description = description
         self.enabled = enabled
+        self.clear = clear
     }
 
     enum CodingKeys: String, CodingKey {
         case url, aws, events, description, enabled
         case topicArn = "topic_arn"
         case queueUrl = "queue_url"
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encodeIfPresent(url, forKey: .url)
+        try c.encodeIfPresent(topicArn, forKey: .topicArn)
+        try c.encodeIfPresent(queueUrl, forKey: .queueUrl)
+        var awsNulls: Set<String> = []
+        if clear.contains(.awsEndpoint) { awsNulls.insert("endpoint") }
+        if clear.contains(.awsMessageGroupId) { awsNulls.insert("message_group_id") }
+        try c.encodeIfPresent(objectAddingNulls(aws, nulls: awsNulls), forKey: .aws)
+        try c.encodeIfPresent(events, forKey: .events)
+        if let description { try c.encode(description, forKey: .description) } else if clear.contains(.description) { try c.encodeNil(forKey: .description) }
+        try c.encodeIfPresent(enabled, forKey: .enabled)
     }
 }
 

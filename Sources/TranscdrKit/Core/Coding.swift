@@ -59,6 +59,38 @@ public enum TranscdrCoding {
     }
 }
 
+/// A write-only secret that is set. The fingerprint changes when the secret
+/// changes and says nothing else (it is keyed by the server and bound to the
+/// object and field): compare it with an earlier read to notice a change made
+/// elsewhere.
+public struct SecretFingerprint: Codable, Hashable, Sendable {
+    public var set: Bool
+    /// `hmac-sha256:<12 hex>`.
+    public var fingerprint: String
+
+    public init(set: Bool = true, fingerprint: String) {
+        self.set = set
+        self.fingerprint = fingerprint
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        set = try c.decodeIfPresent(Bool.self, forKey: .set) ?? true
+        fingerprint = try c.decodeIfPresent(String.self, forKey: .fingerprint) ?? ""
+    }
+
+    enum CodingKeys: String, CodingKey { case set, fingerprint }
+}
+
+/// `value` encoded as a JSON object, with `null` for each of `nulls` it does
+/// not set. Nil when there is nothing to send.
+func objectAddingNulls(_ value: (any Encodable)?, nulls: Set<String>) throws -> JSONValue? {
+    var object: [String: JSONValue] = [:]
+    if let value { object = try JSONValue.from(AnyEncodable(value)).objectValue ?? [:] }
+    for key in nulls where object[key] == nil { object[key] = .null }
+    return value == nil && nulls.isEmpty ? nil : .object(object)
+}
+
 extension KeyedDecodingContainer {
     /// Decode a list that may be missing or null as empty.
     func decodeList<T: Decodable>(_ type: [T].Type, forKey key: Key) throws -> [T] {

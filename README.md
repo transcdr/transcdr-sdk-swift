@@ -7,7 +7,8 @@ transcoding API, for iOS, macOS and server-side Swift (Linux).
   progress), presets, webhooks and events, connections and automations,
   usage and billing, and more.
 - `async`/`await`, typed errors carrying the API's field errors, retries for
-  safe requests, and idempotency keys on job and upload creation.
+  safe requests, and an idempotency key on every create, so a retried create
+  never makes a duplicate.
 - Pagination as an `AsyncSequence`.
 - The output-spec helpers the Transcdr apps use: validation with the
   server's rules, the smallest override against a preset, and a one-line
@@ -18,7 +19,7 @@ transcoding API, for iOS, macOS and server-side Swift (Linux).
 Swift Package Manager:
 
 ```swift
-.package(url: "https://github.com/transcdr/transcdr-sdk-swift", from: "0.2.0")
+.package(url: "https://github.com/transcdr/transcdr-sdk-swift", from: "0.3.0")
 ```
 
 and depend on the `TranscdrKit` product.
@@ -67,6 +68,26 @@ for membership in session.organizations {
 _ = try await client.auth.switch(to: session.organizations[1].organization.id)
 ```
 
+Every create sends an `Idempotency-Key` (a random one unless you pass
+`idempotencyKey:`), so it is retried safely and a retry replays the first
+response. Keys last 24 hours per organization; the same key with a different
+body is a 409 `idempotency_key_reused`.
+
+Updates send `PATCH`: a field left out keeps its value, and `clear` names
+fields to send as `null`, which empties them. `presets.replace` sends the
+whole preset (`PUT`):
+
+```swift
+_ = try await client.automations.update(id, .init(clear: [.destination, .webhookUrl]))
+_ = try await client.webhooks.update(id, .init(clear: [.description, .awsEndpoint]))
+_ = try await client.presets.replace(presetId, .init(name: "Web 1080p", output: OutputSpecInput(spec)))
+```
+
+Connections and webhooks never return their secrets: `secrets` lists the ones
+that are set, each with a `fingerprint` that changes when the secret does.
+`auth.me()` returns a `user` for API keys too (the key's creator); `me.isSession`
+tells a session from an API key.
+
 Errors are `TranscdrError`, with `kind`, `status`, `code`, `param` and
 `fieldErrors` for validation failures.
 
@@ -77,6 +98,7 @@ Swift 5.10+, iOS 17 / macOS 14, or Linux.
 ## Other languages
 
 - TypeScript: [transcdr-sdk-typescript](https://github.com/transcdr/transcdr-sdk-typescript)
+- Python: [transcdr-sdk-python](https://github.com/transcdr/transcdr-sdk-python)
 - Go: [transcdr-sdk-go](https://github.com/transcdr/transcdr-sdk-go)
 
 ## License

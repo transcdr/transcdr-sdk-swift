@@ -196,6 +196,8 @@ public struct Connection: Codable, Hashable, Sendable, Identifiable {
     public var config: ConnectionConfig
     /// Names of the stored secrets (values are never returned).
     public var secretsSet: [String]
+    /// The stored secrets, with their fingerprints.
+    public var secrets: [String: SecretFingerprint]
     public var capabilities: ConnectionCapabilities
     /// `untested`, `ok` or `error`.
     public var status: String
@@ -212,7 +214,7 @@ public struct Connection: Codable, Hashable, Sendable, Identifiable {
     public var updatedAt: Date?
 
     enum CodingKeys: String, CodingKey {
-        case id, name, kind, config, capabilities, status, enabled
+        case id, name, kind, config, capabilities, status, enabled, secrets
         case secretsSet = "secrets_set"
         case connectionClass = "class"
         case failureCount = "failure_count"
@@ -231,6 +233,7 @@ public struct Connection: Codable, Hashable, Sendable, Identifiable {
         kind = try c.decode(ConnectionKind.self, forKey: .kind)
         config = try c.decodeIfPresent(ConnectionConfig.self, forKey: .config) ?? ConnectionConfig()
         secretsSet = try c.decodeList([String].self, forKey: .secretsSet)
+        secrets = (try? c.decodeMap([String: SecretFingerprint].self, forKey: .secrets)) ?? [:]
         capabilities = try c.decodeIfPresent(ConnectionCapabilities.self, forKey: .capabilities) ?? ConnectionCapabilities()
         status = try c.decodeIfPresent(String.self, forKey: .status) ?? "untested"
         connectionClass = try c.decodeIfPresent(String.self, forKey: .connectionClass) ?? (kind.isMessaging ? "messaging" : "storage")
@@ -265,15 +268,36 @@ public struct ConnectionUpdateParams: Encodable, Sendable {
     public var name: String?
     /// `true` turns it back on (failures reset, tested again); `false` turns it off.
     public var enabled: Bool?
-    /// Merged into the stored config.
+    /// Merged into the stored config: a field left out is kept.
     public var config: ConnectionConfig?
+    /// A secret left out is kept; `""` clears it.
     public var secrets: ConnectionSecrets?
+    /// Config fields to clear, by API name (`endpoint`, `message_group_id`, …):
+    /// sent as `null` unless also set in `config`.
+    public var clearConfig: Set<String>
+    /// Storage secrets to clear, by API name (`session_token`, …): sent as `null`.
+    public var clearSecrets: Set<String>
 
-    public init(name: String? = nil, enabled: Bool? = nil, config: ConnectionConfig? = nil, secrets: ConnectionSecrets? = nil) {
+    public init(
+        name: String? = nil, enabled: Bool? = nil, config: ConnectionConfig? = nil, secrets: ConnectionSecrets? = nil,
+        clearConfig: Set<String> = [], clearSecrets: Set<String> = []
+    ) {
         self.name = name
         self.enabled = enabled
         self.config = config
         self.secrets = secrets
+        self.clearConfig = clearConfig
+        self.clearSecrets = clearSecrets
+    }
+
+    enum CodingKeys: String, CodingKey { case name, enabled, config, secrets }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encodeIfPresent(name, forKey: .name)
+        try c.encodeIfPresent(enabled, forKey: .enabled)
+        try c.encodeIfPresent(objectAddingNulls(config, nulls: clearConfig), forKey: .config)
+        try c.encodeIfPresent(objectAddingNulls(secrets, nulls: clearSecrets), forKey: .secrets)
     }
 }
 
@@ -483,7 +507,8 @@ public struct Automation: Codable, Hashable, Sendable, Identifiable {
     }
 }
 
-/// Create (every required field set) or update (only what changes).
+/// Create (every required field set) or update (only what changes). On update,
+/// `clear` names fields to send as `null`, which clears them.
 public struct AutomationParams: Encodable, Sendable {
     public var name: String?
     public var enabled: Bool?
@@ -506,12 +531,20 @@ public struct AutomationParams: Encodable, Sendable {
     public var metadata: Metadata?
     /// `""` clears it.
     public var webhookUrl: String?
+    /// Fields to clear on update: sent as `null` unless they are also set.
+    public var clear: Set<Field>
+
+    public enum Field: String, Hashable, Sendable, CaseIterable {
+        case destination, preset, output, metadata
+        case webhookUrl = "webhook_url"
+        case triggerConnectionId = "trigger_connection_id"
+    }
 
     public init(
         name: String? = nil, enabled: Bool? = nil, trigger: AutomationTrigger? = nil, triggerConnectionId: String? = nil,
         source: AutomationSource? = nil, pollIntervalSeconds: Int? = nil, settleSeconds: Int? = nil, preset: String? = nil,
         output: OutputSpecInput? = nil, destination: JobDestination?? = nil, afterSuccess: String? = nil,
-        priority: Priority? = nil, metadata: Metadata? = nil, webhookUrl: String? = nil
+        priority: Priority? = nil, metadata: Metadata? = nil, webhookUrl: String? = nil, clear: Set<Field> = []
     ) {
         self.name = name
         self.enabled = enabled
@@ -527,6 +560,7 @@ public struct AutomationParams: Encodable, Sendable {
         self.priority = priority
         self.metadata = metadata
         self.webhookUrl = webhookUrl
+        self.clear = clear
     }
 
     enum CodingKeys: String, CodingKey {
@@ -556,6 +590,20 @@ public struct AutomationParams: Encodable, Sendable {
         try c.encodeIfPresent(priority, forKey: .priority)
         try c.encodeIfPresent(metadata, forKey: .metadata)
         try c.encodeIfPresent(webhookUrl, forKey: .webhookUrl)
+        for field in clear where !isSet(field) {
+            try c.encodeNil(forKey: CodingKeys(rawValue: field.rawValue)!)
+        }
+    }
+
+    private func isSet(_ field: Field) -> Bool {
+        switch field {
+        case .destination: return destination != nil
+        case .preset: return preset != nil
+        case .output: return output != nil
+        case .metadata: return metadata != nil
+        case .webhookUrl: return webhookUrl != nil
+        case .triggerConnectionId: return triggerConnectionId != nil
+        }
     }
 }
 

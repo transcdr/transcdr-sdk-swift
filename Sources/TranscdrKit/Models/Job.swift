@@ -550,6 +550,7 @@ public struct Preset: Codable, Hashable, Sendable, Identifiable {
     }
 }
 
+/// Create, or update (`PATCH`: only what changes; `output` merges into the stored spec).
 public struct PresetParams: Encodable, Sendable {
     public var name: String?
     public var slug: String?
@@ -557,12 +558,49 @@ public struct PresetParams: Encodable, Sendable {
     /// A preset's full spec: `OutputSpecInput(spec)`; on update, a diff works too.
     public var output: OutputSpecInput?
     public var metadata: Metadata?
+    /// Fields to clear on update: sent as `null` unless they are also set.
+    public var clear: Set<Field>
 
-    public init(name: String? = nil, slug: String? = nil, description: String? = nil, output: OutputSpecInput? = nil, metadata: Metadata? = nil) {
+    public enum Field: String, Hashable, Sendable, CaseIterable {
+        case description, metadata
+    }
+
+    public init(name: String? = nil, slug: String? = nil, description: String? = nil, output: OutputSpecInput? = nil, metadata: Metadata? = nil, clear: Set<Field> = []) {
         self.name = name
         self.slug = slug
         self.description = description
         self.output = output
+        self.metadata = metadata
+        self.clear = clear
+    }
+
+    enum CodingKeys: String, CodingKey { case name, slug, description, output, metadata }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encodeIfPresent(name, forKey: .name)
+        try c.encodeIfPresent(slug, forKey: .slug)
+        if let description { try c.encode(description, forKey: .description) } else if clear.contains(.description) { try c.encodeNil(forKey: .description) }
+        try c.encodeIfPresent(output, forKey: .output)
+        if let metadata { try c.encode(metadata, forKey: .metadata) } else if clear.contains(.metadata) { try c.encodeNil(forKey: .metadata) }
+    }
+}
+
+/// A whole preset, for `presets.replace` (`PUT`). `output` is the full spec: a
+/// field left out takes its default, as on create. `description` and `metadata`
+/// left out are emptied; `slug` left out is kept.
+public struct PresetReplaceParams: Encodable, Sendable {
+    public var name: String
+    public var output: OutputSpecInput
+    public var slug: String?
+    public var description: String?
+    public var metadata: Metadata?
+
+    public init(name: String, output: OutputSpecInput, slug: String? = nil, description: String? = nil, metadata: Metadata? = nil) {
+        self.name = name
+        self.output = output
+        self.slug = slug
+        self.description = description
         self.metadata = metadata
     }
 }

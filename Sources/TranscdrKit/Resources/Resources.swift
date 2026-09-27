@@ -100,9 +100,9 @@ public struct OrganizationsResource: Sendable {
 
     /// A new organization, on the free plan, owned by the caller. Returns a
     /// session in it, which the client adopts; the previous token stays valid.
-    public func create(name: String) async throws -> AuthResponse {
+    public func create(name: String, idempotencyKey: String = newIdempotencyKey()) async throws -> AuthResponse {
         struct Body: Encodable { let name: String }
-        let session: AuthResponse = try await client.request("POST", "/v1/organizations", body: Body(name: name))
+        let session: AuthResponse = try await client.request("POST", "/v1/organizations", body: Body(name: name), idempotencyKey: idempotencyKey)
         client.apiKey = session.token
         return session
     }
@@ -117,8 +117,8 @@ public struct MembersResource: Sendable {
 
     /// Adds an existing user by email, or creates one (with name and password).
     /// Only owners may add owners (403 `role_required`).
-    public func create(_ params: MemberCreateParams) async throws -> User {
-        try await client.request("POST", "/v1/organization/members", body: params)
+    public func create(_ params: MemberCreateParams, idempotencyKey: String = newIdempotencyKey()) async throws -> User {
+        try await client.request("POST", "/v1/organization/members", body: params, idempotencyKey: idempotencyKey)
     }
 
     /// Only owners may promote to or demote from owner (403 `role_required`);
@@ -146,9 +146,14 @@ public struct APIKeysResource: Sendable {
 
     public func all() -> Paginator<APIKey> { client.pages("/v1/api-keys") }
 
+    /// One key, as the list shows it (no `secret`). 404 once it is revoked.
+    public func retrieve(_ id: String) async throws -> APIKey {
+        try await client.request("GET", "/v1/api-keys/\(seg(id))")
+    }
+
     /// The response carries `secret`, shown once.
-    public func create(_ params: APIKeyCreateParams) async throws -> APIKey {
-        try await client.request("POST", "/v1/api-keys", body: params)
+    public func create(_ params: APIKeyCreateParams, idempotencyKey: String = newIdempotencyKey()) async throws -> APIKey {
+        try await client.request("POST", "/v1/api-keys", body: params, idempotencyKey: idempotencyKey)
     }
 
     public func revoke(_ id: String) async throws {
@@ -161,8 +166,8 @@ public struct APIKeysResource: Sendable {
 public struct UploadsResource: Sendable {
     let client: Transcdr
 
-    public func create(_ params: UploadCreateParams) async throws -> Upload {
-        try await client.request("POST", "/v1/uploads", body: params, idempotencyKey: newIdempotencyKey())
+    public func create(_ params: UploadCreateParams, idempotencyKey: String = newIdempotencyKey()) async throws -> Upload {
+        try await client.request("POST", "/v1/uploads", body: params, idempotencyKey: idempotencyKey)
     }
 
     public func complete(_ id: String) async throws -> Asset {
@@ -213,8 +218,8 @@ public struct AssetsResource: Sendable {
     public func all() -> Paginator<Asset> { client.pages("/v1/assets") }
 
     /// Link an asset by URL (jobs read the URL directly).
-    public func create(_ params: AssetImportParams) async throws -> Asset {
-        try await client.request("POST", "/v1/assets", body: params)
+    public func create(_ params: AssetImportParams, idempotencyKey: String = newIdempotencyKey()) async throws -> Asset {
+        try await client.request("POST", "/v1/assets", body: params, idempotencyKey: idempotencyKey)
     }
 
     public func retrieve(_ id: String) async throws -> Asset {
@@ -347,11 +352,11 @@ public struct ProbeResource: Sendable {
     let client: Transcdr
 
     /// Probe an input. With `wait`, the call returns once the probe finished (up to 90 s).
-    public func create(input: JobInput, wait: Bool = false) async throws -> Job {
+    public func create(input: JobInput, wait: Bool = false, idempotencyKey: String = newIdempotencyKey()) async throws -> Job {
         struct Body: Encodable { let input: JobInput }
         return try await client.request(
             "POST", "/v1/probe", query: [("wait", wait ? "true" : nil)], body: Body(input: input),
-            timeout: wait ? 90 : nil
+            idempotencyKey: idempotencyKey, timeout: wait ? 90 : nil
         )
     }
 }
@@ -367,16 +372,24 @@ public struct PresetsResource: Sendable {
 
     public func all() -> Paginator<Preset> { client.pages("/v1/presets", query: [("limit", "100")]) }
 
-    public func create(_ params: PresetParams) async throws -> Preset {
-        try await client.request("POST", "/v1/presets", body: params)
+    public func create(_ params: PresetParams, idempotencyKey: String = newIdempotencyKey()) async throws -> Preset {
+        try await client.request("POST", "/v1/presets", body: params, idempotencyKey: idempotencyKey)
     }
 
     public func retrieve(_ idOrSlug: String) async throws -> Preset {
         try await client.request("GET", "/v1/presets/\(seg(idOrSlug))")
     }
 
+    /// Change what is set (`PATCH`): `output` merges into the stored spec, and
+    /// `params.clear` empties `description` or `metadata`.
     public func update(_ id: String, _ params: PresetParams) async throws -> Preset {
         try await client.request("PATCH", "/v1/presets/\(seg(id))", body: params)
+    }
+
+    /// Replace the preset (`PUT`): `output` is the whole spec, and `description`
+    /// and `metadata` left out are emptied.
+    public func replace(_ id: String, _ params: PresetReplaceParams) async throws -> Preset {
+        try await client.request("PUT", "/v1/presets/\(seg(id))", body: params)
     }
 
     public func delete(_ id: String) async throws {
@@ -396,8 +409,8 @@ public struct WebhooksResource: Sendable {
     public func all() -> Paginator<WebhookEndpoint> { client.pages("/v1/webhooks") }
 
     /// The response carries `secret`, shown once.
-    public func create(_ params: WebhookCreateParams) async throws -> WebhookEndpoint {
-        try await client.request("POST", "/v1/webhooks", body: params)
+    public func create(_ params: WebhookCreateParams, idempotencyKey: String = newIdempotencyKey()) async throws -> WebhookEndpoint {
+        try await client.request("POST", "/v1/webhooks", body: params, idempotencyKey: idempotencyKey)
     }
 
     public func retrieve(_ id: String) async throws -> WebhookEndpoint {
@@ -544,8 +557,8 @@ public struct ConnectionsResource: Sendable {
     public func all() -> Paginator<Connection> { client.pages("/v1/connections", query: [("limit", "100")]) }
 
     /// Tested before it is saved.
-    public func create(_ params: ConnectionCreateParams) async throws -> Connection {
-        try await client.request("POST", "/v1/connections", body: params)
+    public func create(_ params: ConnectionCreateParams, idempotencyKey: String = newIdempotencyKey()) async throws -> Connection {
+        try await client.request("POST", "/v1/connections", body: params, idempotencyKey: idempotencyKey)
     }
 
     public func retrieve(_ id: String) async throws -> Connection {
@@ -601,8 +614,8 @@ public struct AutomationsResource: Sendable {
 
     public func all() -> Paginator<Automation> { client.pages("/v1/automations", query: [("limit", "100")]) }
 
-    public func create(_ params: AutomationParams) async throws -> Automation {
-        try await client.request("POST", "/v1/automations", body: params)
+    public func create(_ params: AutomationParams, idempotencyKey: String = newIdempotencyKey()) async throws -> Automation {
+        try await client.request("POST", "/v1/automations", body: params, idempotencyKey: idempotencyKey)
     }
 
     public func retrieve(_ id: String) async throws -> Automation {

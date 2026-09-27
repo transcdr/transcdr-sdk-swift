@@ -26,6 +26,8 @@ public struct APIKey: Codable, Hashable, Sendable, Identifiable {
     public var mode: KeyMode
     public var lastUsedAt: Date?
     public var expiresAt: Date?
+    /// Always nil on keys the API returns: `retrieve` is 404 once a key is revoked.
+    public var revokedAt: Date?
     public var createdAt: Date
     /// Only present on create.
     public var secret: String?
@@ -34,6 +36,7 @@ public struct APIKey: Codable, Hashable, Sendable, Identifiable {
         case id, name, prefix, scopes, mode, secret
         case lastUsedAt = "last_used_at"
         case expiresAt = "expires_at"
+        case revokedAt = "revoked_at"
         case createdAt = "created_at"
     }
 
@@ -46,6 +49,7 @@ public struct APIKey: Codable, Hashable, Sendable, Identifiable {
         mode = try c.decodeIfPresent(KeyMode.self, forKey: .mode) ?? .live
         lastUsedAt = try c.decodeIfPresent(Date.self, forKey: .lastUsedAt)
         expiresAt = try c.decodeIfPresent(Date.self, forKey: .expiresAt)
+        revokedAt = try c.decodeIfPresent(Date.self, forKey: .revokedAt)
         createdAt = try c.decode(Date.self, forKey: .createdAt)
         secret = try c.decodeIfPresent(String.self, forKey: .secret)
     }
@@ -133,15 +137,28 @@ public struct Organization: Codable, Hashable, Sendable, Identifiable {
 public struct OrganizationUpdateParams: Encodable, Sendable {
     public var name: String?
     public var billingEmail: String?
+    /// Fields to clear: sent as `null` unless they are also set.
+    public var clear: Set<Field>
 
-    public init(name: String? = nil, billingEmail: String? = nil) {
+    public enum Field: String, Hashable, Sendable, CaseIterable {
+        case billingEmail = "billing_email"
+    }
+
+    public init(name: String? = nil, billingEmail: String? = nil, clear: Set<Field> = []) {
         self.name = name
         self.billingEmail = billingEmail
+        self.clear = clear
     }
 
     enum CodingKeys: String, CodingKey {
         case name
         case billingEmail = "billing_email"
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encodeIfPresent(name, forKey: .name)
+        if let billingEmail { try c.encode(billingEmail, forKey: .billingEmail) } else if clear.contains(.billingEmail) { try c.encodeNil(forKey: .billingEmail) }
     }
 }
 
@@ -298,11 +315,14 @@ public struct AuthResponse: Codable, Sendable {
 }
 
 public struct Me: Codable, Sendable {
-    /// Nil when authenticated with an API key.
+    /// The signed-in user, or for an API key the user who created the key. A
+    /// user does not mean a session: see `isSession`.
     public var user: User?
     public var organization: Organization
-    /// Every organization the user belongs to; empty for API keys.
+    /// Every organization the user belongs to (sessions); always empty for API keys.
     public var organizations: [Membership]
+    /// The token presented: a session's `prefix` starts `tds_`, an API key's
+    /// `tdk_live_` or `tdk_test_`.
     public var apiKey: APIKey?
     public var scopes: [String]
     /// False for test-mode keys.
@@ -332,14 +352,19 @@ public struct Me: Codable, Sendable {
         scopes.contains("*") || scopes.contains(scope)
     }
 
-    /// Owner or admin.
+    /// Owner or admin. For an API key: whether it holds `org:write`.
     public var isManager: Bool {
-        guard let role = user?.role else { return apiKey != nil && can("org:write") }
+        guard isSession, let role = user?.role else { return apiKey != nil && can("org:write") }
         return role == .owner || role == .admin
     }
 
     /// Signed in with a session (not an API key): can switch organizations.
-    public var isSession: Bool { user != nil && apiKey == nil }
+    /// A session's `apiKey` is the session token itself (prefix `tds_`).
+    public var isSession: Bool {
+        if let prefix = apiKey?.prefix, !prefix.isEmpty { return prefix.hasPrefix("tds_") }
+        // Older servers: no `apiKey` for a session, and no `user` for an API key.
+        return user != nil && apiKey == nil
+    }
 
     /// The user's role in the current organization.
     public var role: Role? { user?.role }
