@@ -18,7 +18,7 @@ transcoding API, for iOS, macOS and server-side Swift (Linux).
 Swift Package Manager:
 
 ```swift
-.package(url: "https://github.com/transcdr/transcdr-sdk-swift", from: "0.1.0")
+.package(url: "https://github.com/transcdr/transcdr-sdk-swift", from: "0.2.0")
 ```
 
 and depend on the `TranscdrKit` product.
@@ -53,6 +53,18 @@ Walk every page:
 for try await job in client.jobs.all(.init(status: .failed)) {
     print(job.id, job.error?.message ?? "")
 }
+```
+
+One login can belong to several organizations. A session token belongs to
+one of them; switching revokes it, and the client adopts the new one:
+
+```swift
+let session = try await client.auth.login(.init(email: email, password: password))
+client.apiKey = session.token
+for membership in session.organizations {
+    print(membership.organization.name, membership.role)
+}
+_ = try await client.auth.switch(to: session.organizations[1].organization.id)
 ```
 
 Errors are `TranscdrError`, with `kind`, `status`, `code`, `param` and

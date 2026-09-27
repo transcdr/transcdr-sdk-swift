@@ -163,13 +163,60 @@ public struct User: Codable, Hashable, Sendable, Identifiable {
     }
 }
 
+/// A membership: one of the organizations a user belongs to, with their role
+/// there.
+public struct Membership: Codable, Hashable, Sendable, Identifiable {
+    public var organization: Organization
+    public var role: Role
+    public var createdAt: Date?
+
+    /// The organization's id.
+    public var id: String { organization.id }
+
+    enum CodingKeys: String, CodingKey {
+        case organization, role
+        case createdAt = "created_at"
+    }
+
+    public init(organization: Organization, role: Role, createdAt: Date? = nil) {
+        self.organization = organization
+        self.role = role
+        self.createdAt = createdAt
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        organization = try c.decode(Organization.self, forKey: .organization)
+        role = try c.decodeIfPresent(Role.self, forKey: .role) ?? .member
+        createdAt = try? c.decodeIfPresent(Date.self, forKey: .createdAt)
+    }
+}
+
+extension KeyedDecodingContainer {
+    /// Memberships that may be missing, null or partly unreadable: the ones
+    /// that decode.
+    func decodeMemberships(forKey key: Key) -> [Membership] {
+        guard let items = try? decodeIfPresent([Lenient<Membership>].self, forKey: key) else { return [] }
+        return items.compactMap(\.value)
+    }
+}
+
+/// Decodes `T`, or nil when the value doesn't fit.
+struct Lenient<T: Decodable>: Decodable {
+    let value: T?
+    init(from decoder: Decoder) throws { value = try? T(from: decoder) }
+}
+
+/// Adds a member. An email that already has a login gives that user access
+/// (`name` and `password` must then be nil); a new email creates the user and
+/// needs both.
 public struct MemberCreateParams: Encodable, Sendable {
-    public var name: String
+    public var name: String?
     public var email: String
     public var role: Role
-    public var password: String
+    public var password: String?
 
-    public init(name: String, email: String, role: Role, password: String) {
+    public init(name: String? = nil, email: String, role: Role, password: String? = nil) {
         self.name = name
         self.email = email
         self.role = role
@@ -199,10 +246,18 @@ public struct RegisterParams: Encodable, Sendable {
 public struct LoginParams: Encodable, Sendable {
     public var email: String
     public var password: String
+    /// The organization to sign in to; by default the one used last.
+    public var organizationId: String?
 
-    public init(email: String, password: String) {
+    public init(email: String, password: String, organizationId: String? = nil) {
         self.email = email
         self.password = password
+        self.organizationId = organizationId
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case email, password
+        case organizationId = "organization_id"
     }
 }
 
@@ -221,16 +276,33 @@ public struct ChangePasswordParams: Encodable, Sendable {
     }
 }
 
+/// A session: from login, register, switching or creating an organization.
 public struct AuthResponse: Codable, Sendable {
+    /// A session token (`tds_…`) for `organization`.
     public var token: String
+    /// The user, with their role in `organization`.
     public var user: User
     public var organization: Organization
+    /// Every organization the user belongs to.
+    public var organizations: [Membership]
+
+    enum CodingKeys: String, CodingKey { case token, user, organization, organizations }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        token = try c.decode(String.self, forKey: .token)
+        user = try c.decode(User.self, forKey: .user)
+        organization = try c.decode(Organization.self, forKey: .organization)
+        organizations = c.decodeMemberships(forKey: .organizations)
+    }
 }
 
 public struct Me: Codable, Sendable {
     /// Nil when authenticated with an API key.
     public var user: User?
     public var organization: Organization
+    /// Every organization the user belongs to; empty for API keys.
+    public var organizations: [Membership]
     public var apiKey: APIKey?
     public var scopes: [String]
     /// False for test-mode keys.
@@ -239,7 +311,7 @@ public struct Me: Codable, Sendable {
     public var isPlatformAdmin: Bool?
 
     enum CodingKeys: String, CodingKey {
-        case user, organization, scopes, livemode
+        case user, organization, organizations, scopes, livemode
         case apiKey = "api_key"
         case isPlatformAdmin = "is_platform_admin"
     }
@@ -248,6 +320,7 @@ public struct Me: Codable, Sendable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         user = try c.decodeIfPresent(User.self, forKey: .user)
         organization = try c.decode(Organization.self, forKey: .organization)
+        organizations = c.decodeMemberships(forKey: .organizations)
         apiKey = try? c.decodeIfPresent(APIKey.self, forKey: .apiKey)
         scopes = try c.decodeList([String].self, forKey: .scopes)
         livemode = try c.decodeIfPresent(Bool.self, forKey: .livemode)
@@ -264,6 +337,15 @@ public struct Me: Codable, Sendable {
         guard let role = user?.role else { return apiKey != nil && can("org:write") }
         return role == .owner || role == .admin
     }
+
+    /// Signed in with a session (not an API key): can switch organizations.
+    public var isSession: Bool { user != nil && apiKey == nil }
+
+    /// The user's role in the current organization.
+    public var role: Role? { user?.role }
+
+    /// Only an owner may add, change or remove an owner.
+    public var isOwner: Bool { user?.role == .owner }
 
     public var isOperator: Bool { isPlatformAdmin == true || user?.isPlatformAdmin == true }
 }

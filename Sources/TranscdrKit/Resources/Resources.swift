@@ -33,8 +33,26 @@ public struct AuthResource: Sendable {
         try await client.request("POST", "/v1/auth/register", body: params)
     }
 
-    public func login(_ params: LoginParams) async throws -> AuthResponse {
-        try await client.request("POST", "/v1/auth/login", body: params)
+    /// Signs in to `organizationId` when given (else `params.organizationId`,
+    /// else the organization used last).
+    public func login(_ params: LoginParams, organizationId: String? = nil) async throws -> AuthResponse {
+        var params = params
+        if let organizationId { params.organizationId = organizationId }
+        return try await client.request("POST", "/v1/auth/login", body: params)
+    }
+
+    /// A session in another of the user's organizations. The current session
+    /// token is revoked, so the client adopts the new one. Sessions only: an
+    /// API key gets 403 `session_required`; an organization the user isn't in,
+    /// 403 `not_a_member`.
+    public func `switch`(to organizationId: String) async throws -> AuthResponse {
+        struct Body: Encodable {
+            let organizationId: String
+            enum CodingKeys: String, CodingKey { case organizationId = "organization_id" }
+        }
+        let session: AuthResponse = try await client.request("POST", "/v1/auth/switch", body: Body(organizationId: organizationId))
+        client.apiKey = session.token
+        return session
     }
 
     public func logout() async throws {
@@ -71,6 +89,25 @@ public struct OrganizationResource: Sendable {
     }
 }
 
+/// The organizations the signed-in user belongs to (sessions only).
+public struct OrganizationsResource: Sendable {
+    let client: Transcdr
+
+    /// The user's memberships.
+    public func list() async throws -> [Membership] {
+        try await client.collection("/v1/organizations", as: Membership.self).data
+    }
+
+    /// A new organization, on the free plan, owned by the caller. Returns a
+    /// session in it, which the client adopts; the previous token stays valid.
+    public func create(name: String) async throws -> AuthResponse {
+        struct Body: Encodable { let name: String }
+        let session: AuthResponse = try await client.request("POST", "/v1/organizations", body: Body(name: name))
+        client.apiKey = session.token
+        return session
+    }
+}
+
 public struct MembersResource: Sendable {
     let client: Transcdr
 
@@ -78,15 +115,21 @@ public struct MembersResource: Sendable {
         try await client.collection("/v1/organization/members", as: User.self).data
     }
 
+    /// Adds an existing user by email, or creates one (with name and password).
+    /// Only owners may add owners (403 `role_required`).
     public func create(_ params: MemberCreateParams) async throws -> User {
         try await client.request("POST", "/v1/organization/members", body: params)
     }
 
+    /// Only owners may promote to or demote from owner (403 `role_required`);
+    /// the last owner can't be demoted (409 `last_owner`).
     public func update(_ id: String, role: Role) async throws -> User {
         struct Body: Encodable { let role: Role }
         return try await client.request("PATCH", "/v1/organization/members/\(seg(id))", body: Body(role: role))
     }
 
+    /// Removes the membership; your own id leaves the organization. The last
+    /// owner can't be removed (409 `last_owner`).
     public func remove(_ id: String) async throws {
         try await client.requestVoid("DELETE", "/v1/organization/members/\(seg(id))")
     }

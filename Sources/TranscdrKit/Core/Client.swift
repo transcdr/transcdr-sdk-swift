@@ -14,7 +14,7 @@ public typealias Query = [(String, String?)]
 /// ```
 public final class Transcdr: @unchecked Sendable {
     public static let defaultBaseURL = URL(string: "https://api.transcdr.com")!
-    public static let version = "0.1.0"
+    public static let version = "0.2.0"
 
     public let baseURL: URL
     public let maxRetries: Int
@@ -58,6 +58,7 @@ public final class Transcdr: @unchecked Sendable {
 
     public var auth: AuthResource { .init(client: self) }
     public var organization: OrganizationResource { .init(client: self) }
+    public var organizations: OrganizationsResource { .init(client: self) }
     public var apiKeys: APIKeysResource { .init(client: self) }
     public var uploads: UploadsResource { .init(client: self) }
     public var assets: AssetsResource { .init(client: self) }
