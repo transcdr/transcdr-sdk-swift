@@ -52,7 +52,8 @@ public struct Rendition: Codable, Hashable, Sendable {
     public var width: Int
     /// Even, 64–4320.
     public var height: Int
-    /// e.g. `"3M"` or `"800k"`; nil codes to the quality target.
+    /// This rendition's constant bitrate under `cbr`, e.g. `"3M"` or `"800k"`;
+    /// nil takes `quality.bitrate` or the default for its size.
     public var bitrate: String?
     /// 1–32 of `[A-Za-z0-9_-]`; defaults to `"<short side>p"`.
     public var label: String?
@@ -85,24 +86,39 @@ public struct Ladder: Codable, Hashable, Sendable {
 }
 
 public struct Quality: Codable, Hashable, Sendable {
-    /// `visually_lossless`, `high`, `standard`, `low` or `vmaf=N`.
+    /// `visually_lossless`, `high`, `standard`, `low`, `vmaf=N` or `cbr`.
     public var target: String?
-    /// 0–63; wins over `target`.
+    /// 0–63; wins over `target`. Not with `cbr`.
     public var crf: Int?
+    /// `cbr`: the rate for renditions without their own, e.g. `"5M"`.
+    public var bitrate: String?
+    /// `cbr`: the rate buffer in milliseconds, 100–10000 (default 1000).
+    public var bufferMs: Int?
 
-    public init(target: String? = nil, crf: Int? = nil) {
+    public init(target: String? = nil, crf: Int? = nil, bitrate: String? = nil, bufferMs: Int? = nil) {
         self.target = target
         self.crf = crf
+        self.bitrate = bitrate
+        self.bufferMs = bufferMs
     }
 
-    public static let targets = ["visually_lossless", "high", "standard", "low"]
+    /// Constant bit rate: every rendition is coded at a fixed rate.
+    public static let cbr = "cbr"
+    public static let targets = ["visually_lossless", "high", "standard", "low", cbr]
 
-    enum CodingKeys: String, CodingKey { case target, crf }
+    public var isCbr: Bool { target == Self.cbr }
+
+    enum CodingKeys: String, CodingKey {
+        case target, crf, bitrate
+        case bufferMs = "buffer_ms"
+    }
 
     public func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
         try c.encodeIfPresent(target, forKey: .target)
         try c.encodeIfPresent(crf, forKey: .crf)
+        try c.encodeIfPresent(bitrate, forKey: .bitrate)
+        try c.encodeIfPresent(bufferMs, forKey: .bufferMs)
     }
 }
 

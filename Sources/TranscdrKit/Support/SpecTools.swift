@@ -53,7 +53,10 @@ public enum SpecTools {
         out.renditions = (out.renditions ?? []).map { r in
             Rendition(width: r.width, height: r.height, bitrate: trimmed(r.bitrate), label: trimmed(r.label))
         }
-        out.quality = Quality(target: trimmed(out.quality?.target), crf: out.quality?.crf)
+        out.quality = Quality(
+            target: trimmed(out.quality?.target), crf: out.quality?.crf,
+            bitrate: trimmed(out.quality?.bitrate), bufferMs: out.quality?.bufferMs
+        )
         out.audio = AudioSettings(mode: out.audio?.mode ?? .auto, bitrate: trimmed(out.audio?.bitrate))
         if out.mode != .hls { out.segmentSeconds = nil }
         out.subtitles = trimmed(out.subtitles)
@@ -95,6 +98,59 @@ public enum SpecTools {
         return Int((n * mult).rounded(.down))
     }
 
+    /// `5000000` → `5M`, `3250000` → `3.25M`, `800000` → `800k`.
+    public static func formatBitrate(_ bps: Int) -> String {
+        if bps >= 1_000_000 { return trimNumber(Double(bps) / 1e6) + "M" }
+        if bps >= 1000 { return trimNumber(Double(bps) / 1e3) + "k" }
+        return String(bps)
+    }
+
+    /// Up to two decimals, without trailing zeros.
+    fileprivate static func trimNumber(_ n: Double) -> String {
+        var s = String(format: "%.2f", n)
+        while s.hasSuffix("0") { s.removeLast() }
+        if s.hasSuffix(".") { s.removeLast() }
+        return s
+    }
+
+    /// The rates a constant-bitrate rendition may ask for, bits per second.
+    public static let cbrRange = 100_000...200_000_000
+
+    /// The rate a `cbr` rendition without one of its own (nor `quality.bitrate`)
+    /// is coded at, bits per second, as the service computes it. H.264 up to
+    /// 30 fps by short side: 144 → 0.2M, 240 → 0.4M, 360 → 0.8M, 480 → 1.2M,
+    /// 720 → 3M, 1080 → 5M, 1440 → 9M, 2160 → 16M; linear between rows, by
+    /// area above 2160. Above 30 fps it grows by half the extra frame rate
+    /// (capped at 120 fps). H.265 is 0.65× and AV1 0.5×. `fps` nil means 30.
+    public static func defaultCbrRate(codec: VideoCodec, width: Int, height: Int, fps: Double? = nil) -> Int {
+        let table: [(side: Double, bps: Double)] = [
+            (144, 200_000), (240, 400_000), (360, 800_000), (480, 1_200_000),
+            (720, 3_000_000), (1080, 5_000_000), (1440, 9_000_000), (2160, 16_000_000),
+        ]
+        let side = Double(max(1, min(width, height)))
+        let base: Double
+        if side <= table[0].side {
+            base = table[0].bps
+        } else if side >= table[table.count - 1].side {
+            let scale = side / table[table.count - 1].side
+            base = table[table.count - 1].bps * scale * scale
+        } else {
+            let i = table.firstIndex { side <= $0.side }!
+            let (lo, hi) = (table[i - 1], table[i])
+            base = lo.bps + (hi.bps - lo.bps) * (side - lo.side) / (hi.side - lo.side)
+        }
+        let rate = fps.flatMap { $0.isFinite && $0 > 30 ? min($0, 120) : nil } ?? 30
+        let codecScale = codec == .h265 ? 0.65 : codec == .av1 ? 0.5 : 1
+        let bps = (base * (1 + 0.5 * (rate / 30 - 1)) * codecScale / 1000).rounded() * 1000
+        return Int(max(1000, bps))
+    }
+
+    /// A constant-bitrate rate's error, with the server's messages; nil when valid.
+    private static func cbrRateError(_ s: String) -> String? {
+        guard let bps = parseBitrate(s) else { return "Bitrate must look like 800k, 3M or 2500000." }
+        return cbrRange.contains(bps) ? nil : "A constant bitrate must be between 100k and 200M."
+    }
+
     public static func isQualityTarget(_ target: String) -> Bool {
         if Quality.targets.contains(target) { return true }
         guard target.hasPrefix("vmaf="), let n = Int(target.dropFirst(5)), target.count <= 8 else { return false }
@@ -126,7 +182,13 @@ public enum SpecTools {
             if r.height < 64 || r.height > 4320 { set(at("height"), "Height must be between 64 and 4320.") }
             else if r.height % 2 != 0 { set(at("height"), "Width and height must be even (4:2:0 chroma).") }
             if shortSide(r) > maxShortSide { set(at("height"), "Your plan allows renditions up to \(maxShortSide)p.") }
-            if let b = r.bitrate, parseBitrate(b) == nil { set(at("bitrate"), "Bitrate must look like 800k, 3M or 2500000.") }
+            if let b = r.bitrate {
+                if s.quality?.isCbr != true {
+                    set(at("bitrate"), "A rendition bitrate is a constant bit rate: set quality.target to \"cbr\", or remove the bitrate to code to a quality level.")
+                } else if let message = cbrRateError(b) {
+                    set(at("bitrate"), message)
+                }
+            }
             if let l = r.label, l.range(of: "^[A-Za-z0-9_-]{1,32}$", options: .regularExpression) == nil {
                 set(at("label"), "Labels are 1–32 characters of A–Z, a–z, 0–9, - and _.")
             }
@@ -138,6 +200,13 @@ public enum SpecTools {
         }
         if let target = s.quality?.target, !isQualityTarget(target) {
             set("quality.target", "Target must be visually_lossless, high, standard, low or vmaf=N (N between 1 and 100).")
+        }
+        if let q = s.quality, q.isCbr {
+            if q.crf != nil { set("quality.crf", "crf names a quality level and cbr a bit rate: use one or the other.") }
+            if let b = q.bitrate, let message = cbrRateError(b) { set("quality.bitrate", message) }
+            if let ms = q.bufferMs, !(100...10_000).contains(ms) { set("quality.buffer_ms", "buffer_ms must be between 100 and 10000.") }
+        } else if let q = s.quality, q.bitrate != nil || q.bufferMs != nil {
+            set(q.bitrate != nil ? "quality.bitrate" : "quality.buffer_ms", "A bitrate and buffer apply to constant bit rate: set quality.target to \"cbr\".")
         }
         if let crf = s.quality?.crf, crf < 0 || crf > 63 { set("quality.crf", "crf must be between 0 and 63.") }
         if let gop = s.gop, gop < 1 || gop > 1200 { set("gop", "gop must be between 1 and 1200 frames.") }
@@ -173,7 +242,8 @@ public enum SpecTools {
         return errors
     }
 
-    /// `HLS · AV1 · ladder ≤ 1080p · standard`.
+    /// `HLS · AV1 · ladder ≤ 1080p · standard`, or under constant bit rate
+    /// `HLS · H.264 · 1080p / 720p · CBR 5 / 3 Mb/s`.
     public static func describe(_ spec: OutputSpec?) -> String {
         guard let spec else { return "—" }
         var parts = [spec.mode == .hls ? "HLS" : "MP4", Catalog.codecName(spec.codec ?? .av1)]
@@ -186,8 +256,29 @@ public enum SpecTools {
         }
         if let color = spec.color, color != .sdr { parts.append(color.rawValue.uppercased()) }
         if let crf = spec.quality?.crf { parts.append("crf \(crf)") }
+        else if let q = spec.quality, q.isCbr { parts.append(describeCbr(spec, q)) }
         else if let target = spec.quality?.target { parts.append(target.replacingOccurrences(of: "_", with: " ")) }
         return parts.joined(separator: " · ")
+    }
+}
+
+extension SpecTools {
+    /// `CBR 5 / 3 Mb/s`, `CBR 5 Mb/s` or `CBR (default rates)`.
+    fileprivate static func describeCbr(_ spec: OutputSpec, _ q: Quality) -> String {
+        let shared = q.bitrate.flatMap(parseBitrate)
+        let renditions = spec.renditions ?? []
+        let rates: [Int]
+        if !renditions.isEmpty, shared != nil || renditions.contains(where: { $0.bitrate != nil }) {
+            rates = renditions.map { r in
+                r.bitrate.flatMap(parseBitrate) ?? shared
+                    ?? defaultCbrRate(codec: spec.codec ?? .av1, width: r.width, height: r.height, fps: spec.maxFps)
+            }
+        } else if let shared {
+            rates = [shared]
+        } else {
+            return "CBR (default rates)"
+        }
+        return "CBR " + rates.map { trimNumber(Double($0) / 1e6) }.joined(separator: " / ") + " Mb/s"
     }
 }
 
