@@ -366,11 +366,21 @@ public struct ProbeResource: Sendable {
 public struct PresetsResource: Sendable {
     let client: Transcdr
 
-    public func list(_ params: ListParams = .init()) async throws -> ListResponse<Preset> {
-        try await client.collection("/v1/presets", query: params.query)
+    /// `category`: any of these; `compatibleWith`: every one of these.
+    public func list(_ params: ListParams = .init(), category: [PresetCategory]? = nil, compatibleWith: [Platform]? = nil) async throws -> ListResponse<Preset> {
+        try await client.collection("/v1/presets", query: params.query + Self.filters(category, compatibleWith))
     }
 
-    public func all() -> Paginator<Preset> { client.pages("/v1/presets", query: [("limit", "100")]) }
+    public func all(category: [PresetCategory]? = nil, compatibleWith: [Platform]? = nil) -> Paginator<Preset> {
+        client.pages("/v1/presets", query: [("limit", "100")] + Self.filters(category, compatibleWith))
+    }
+
+    static func filters(_ category: [PresetCategory]?, _ compatibleWith: [Platform]?) -> Query {
+        [
+            ("category", category.map { $0.map(\.rawValue).joined(separator: ",") }),
+            ("compatible_with", compatibleWith.map { $0.map(\.rawValue).joined(separator: ",") }),
+        ]
+    }
 
     public func create(_ params: PresetParams, idempotencyKey: String = newIdempotencyKey()) async throws -> Preset {
         try await client.request("POST", "/v1/presets", body: params, idempotencyKey: idempotencyKey)

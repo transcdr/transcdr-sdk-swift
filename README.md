@@ -83,6 +83,23 @@ _ = try await client.webhooks.update(id, .init(clear: [.description, .awsEndpoin
 _ = try await client.presets.replace(presetId, .init(name: "Web 1080p", output: OutputSpecInput(spec)))
 ```
 
+Every preset has a `category` (`.web`, `.mobile`, `.streaming`, `.tv`,
+`.social`, `.audio`, `.archive`) and a `compatibility` list of the platforms
+its output plays on (`.web`, `.ios`, `.android`, `.smartTV`, `.legacy`,
+`.editing`). Each platform has a note giving minimum versions and conditions,
+such as audio that has to be AAC in the source. Both are derived from the
+output spec. Your own presets can set them, and clearing them derives them
+again. Both types accept values this SDK doesn't know yet.
+
+```swift
+let phones = try await client.presets.list(category: [.mobile], compatibleWith: [.ios, .android])
+for preset in phones.data {
+    print(preset.name, preset.compatibility, preset.note(for: .ios) ?? "")
+}
+_ = try await client.presets.update(id, .init(category: .tv, compatibilityNotes: ["smart_tv": "Tested on our set-top box."]))
+_ = try await client.presets.update(id, .init(clear: [.category, .compatibility, .compatibilityNotes]))
+```
+
 Connections and webhooks never return their secrets: `secrets` lists the ones
 that are set, each with a `fingerprint` that changes when the secret does.
 `auth.me()` returns a `user` for API keys too (the key's creator); `me.isSession`

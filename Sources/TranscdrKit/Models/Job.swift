@@ -518,6 +518,45 @@ public struct UploadCreateParams: Encodable, Sendable {
 
 // MARK: - Presets
 
+/// The group a preset is shown in. More may be added.
+public struct PresetCategory: OpenEnum {
+    public let rawValue: String
+    public init(rawValue: String) { self.rawValue = rawValue }
+    /// A single MP4 for browsers.
+    public static let web: Self = "web"
+    /// A single file for native iOS and Android playback.
+    public static let mobile: Self = "mobile"
+    /// Adaptive HLS.
+    public static let streaming: Self = "streaming"
+    /// Smart TVs, set-top boxes and constant bit rate.
+    public static let tv: Self = "tv"
+    /// Portrait video for social apps.
+    public static let social: Self = "social"
+    /// Audio-only output.
+    public static let audio: Self = "audio"
+    /// Preservation and mastering: visually lossless, HDR.
+    public static let archive: Self = "archive"
+    /// Every known category, in display order.
+    public static let all: [Self] = [.web, .mobile, .streaming, .tv, .social, .audio, .archive]
+}
+
+/// Where an output plays. More may be added.
+public struct Platform: OpenEnum {
+    public let rawValue: String
+    public init(rawValue: String) { self.rawValue = rawValue }
+    /// Current Chrome, Edge, Firefox and Safari.
+    public static let web: Self = "web"
+    public static let ios: Self = "ios"
+    public static let android: Self = "android"
+    public static let smartTV: Self = "smart_tv"
+    /// Old browsers and devices, set-top boxes.
+    public static let legacy: Self = "legacy"
+    /// Editing applications.
+    public static let editing: Self = "editing"
+    /// Every known platform, in display order.
+    public static let all: [Self] = [.web, .ios, .android, .smartTV, .legacy, .editing]
+}
+
 public struct Preset: Codable, Hashable, Sendable, Identifiable {
     /// `pre_…`, or the slug for system presets.
     public var id: String
@@ -525,13 +564,25 @@ public struct Preset: Codable, Hashable, Sendable, Identifiable {
     public var name: String
     public var description: String
     public var system: Bool
+    /// The group it is shown in: its own, else derived from `output`.
+    /// Nil from a server that predates categories.
+    public var category: PresetCategory?
+    /// Where the output plays: its own, else derived from `output`.
+    public var compatibility: [Platform]
+    /// Minimum versions and conditions, keyed by `Platform.rawValue`, for
+    /// each platform in `compatibility`.
+    public var compatibilityNotes: [String: String]
     public var output: OutputSpec
     public var metadata: Metadata
     public var createdAt: Date?
     public var updatedAt: Date?
 
+    /// This platform's note, if it has one.
+    public func note(for platform: Platform) -> String? { compatibilityNotes[platform.rawValue] }
+
     enum CodingKeys: String, CodingKey {
-        case id, slug, name, description, system, output, metadata
+        case id, slug, name, description, system, category, compatibility, output, metadata
+        case compatibilityNotes = "compatibility_notes"
         case createdAt = "created_at"
         case updatedAt = "updated_at"
     }
@@ -543,6 +594,9 @@ public struct Preset: Codable, Hashable, Sendable, Identifiable {
         name = try c.decodeIfPresent(String.self, forKey: .name) ?? slug
         description = try c.decodeIfPresent(String.self, forKey: .description) ?? ""
         system = try c.decodeIfPresent(Bool.self, forKey: .system) ?? false
+        category = try c.decodeIfPresent(PresetCategory.self, forKey: .category)
+        compatibility = try c.decodeList([Platform].self, forKey: .compatibility)
+        compatibilityNotes = try c.decodeMap([String: String].self, forKey: .compatibilityNotes)
         output = try c.decodeIfPresent(OutputSpec.self, forKey: .output) ?? OutputSpec()
         metadata = try c.decodeMap(Metadata.self, forKey: .metadata)
         createdAt = try c.decodeIfPresent(Date.self, forKey: .createdAt)
@@ -558,23 +612,42 @@ public struct PresetParams: Encodable, Sendable {
     /// A preset's full spec: `OutputSpecInput(spec)`; on update, a diff works too.
     public var output: OutputSpecInput?
     public var metadata: Metadata?
+    /// Your own category; left out, it is derived from `output`.
+    public var category: PresetCategory?
+    /// The platforms to claim; left out, they are derived from `output`.
+    public var compatibility: [Platform]?
+    /// Notes over the derived ones, keyed by `Platform.rawValue`, only for
+    /// platforms the preset claims; 1–500 characters each.
+    public var compatibilityNotes: [String: String]?
     /// Fields to clear on update: sent as `null` unless they are also set.
+    /// Clearing `category`, `compatibility` or `compatibilityNotes` derives
+    /// them from `output` again.
     public var clear: Set<Field>
 
     public enum Field: String, Hashable, Sendable, CaseIterable {
-        case description, metadata
+        case description, metadata, category, compatibility
+        case compatibilityNotes = "compatibility_notes"
     }
 
-    public init(name: String? = nil, slug: String? = nil, description: String? = nil, output: OutputSpecInput? = nil, metadata: Metadata? = nil, clear: Set<Field> = []) {
+    public init(
+        name: String? = nil, slug: String? = nil, description: String? = nil, output: OutputSpecInput? = nil, metadata: Metadata? = nil,
+        category: PresetCategory? = nil, compatibility: [Platform]? = nil, compatibilityNotes: [String: String]? = nil, clear: Set<Field> = []
+    ) {
         self.name = name
         self.slug = slug
         self.description = description
         self.output = output
         self.metadata = metadata
+        self.category = category
+        self.compatibility = compatibility
+        self.compatibilityNotes = compatibilityNotes
         self.clear = clear
     }
 
-    enum CodingKeys: String, CodingKey { case name, slug, description, output, metadata }
+    enum CodingKeys: String, CodingKey {
+        case name, slug, description, output, metadata, category, compatibility
+        case compatibilityNotes = "compatibility_notes"
+    }
 
     public func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
@@ -583,24 +656,43 @@ public struct PresetParams: Encodable, Sendable {
         if let description { try c.encode(description, forKey: .description) } else if clear.contains(.description) { try c.encodeNil(forKey: .description) }
         try c.encodeIfPresent(output, forKey: .output)
         if let metadata { try c.encode(metadata, forKey: .metadata) } else if clear.contains(.metadata) { try c.encodeNil(forKey: .metadata) }
+        if let category { try c.encode(category, forKey: .category) } else if clear.contains(.category) { try c.encodeNil(forKey: .category) }
+        if let compatibility { try c.encode(compatibility, forKey: .compatibility) } else if clear.contains(.compatibility) { try c.encodeNil(forKey: .compatibility) }
+        if let compatibilityNotes { try c.encode(compatibilityNotes, forKey: .compatibilityNotes) } else if clear.contains(.compatibilityNotes) { try c.encodeNil(forKey: .compatibilityNotes) }
     }
 }
 
 /// A whole preset, for `presets.replace` (`PUT`). `output` is the full spec: a
 /// field left out takes its default, as on create. `description` and `metadata`
-/// left out are emptied; `slug` left out is kept.
+/// left out are emptied; `category`, `compatibility` and `compatibilityNotes`
+/// left out are derived again; `slug` left out is kept.
 public struct PresetReplaceParams: Encodable, Sendable {
     public var name: String
     public var output: OutputSpecInput
     public var slug: String?
     public var description: String?
     public var metadata: Metadata?
+    public var category: PresetCategory?
+    public var compatibility: [Platform]?
+    /// Keyed by `Platform.rawValue`.
+    public var compatibilityNotes: [String: String]?
 
-    public init(name: String, output: OutputSpecInput, slug: String? = nil, description: String? = nil, metadata: Metadata? = nil) {
+    public init(
+        name: String, output: OutputSpecInput, slug: String? = nil, description: String? = nil, metadata: Metadata? = nil,
+        category: PresetCategory? = nil, compatibility: [Platform]? = nil, compatibilityNotes: [String: String]? = nil
+    ) {
         self.name = name
         self.output = output
         self.slug = slug
         self.description = description
         self.metadata = metadata
+        self.category = category
+        self.compatibility = compatibility
+        self.compatibilityNotes = compatibilityNotes
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case name, output, slug, description, metadata, category, compatibility
+        case compatibilityNotes = "compatibility_notes"
     }
 }
