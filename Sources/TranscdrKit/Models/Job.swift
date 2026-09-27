@@ -336,8 +336,8 @@ public struct Job: Codable, Hashable, Sendable, Identifiable {
 
 public struct JobCreateParams: Encodable, Sendable {
     public var input: JobInput
-    /// Overrides merged over the preset's spec.
-    public var output: OutputSpec?
+    /// Overrides merged over the preset's spec (see `SpecTools.diff`).
+    public var output: OutputSpecInput?
     /// A system preset slug (e.g. `hls-av1-abr`) or a `pre_…` id.
     public var preset: String?
     public var priority: Priority?
@@ -348,7 +348,7 @@ public struct JobCreateParams: Encodable, Sendable {
     public var maxCostCents: Int?
 
     public init(
-        input: JobInput, output: OutputSpec? = nil, preset: String? = nil, priority: Priority? = nil,
+        input: JobInput, output: OutputSpecInput? = nil, preset: String? = nil, priority: Priority? = nil,
         metadata: Metadata? = nil, webhookUrl: String? = nil, destination: JobDestination? = nil, maxCostCents: Int? = nil
     ) {
         self.input = input
@@ -554,10 +554,11 @@ public struct PresetParams: Encodable, Sendable {
     public var name: String?
     public var slug: String?
     public var description: String?
-    public var output: OutputSpec?
+    /// A preset's full spec: `OutputSpecInput(spec)`; on update, a diff works too.
+    public var output: OutputSpecInput?
     public var metadata: Metadata?
 
-    public init(name: String? = nil, slug: String? = nil, description: String? = nil, output: OutputSpec? = nil, metadata: Metadata? = nil) {
+    public init(name: String? = nil, slug: String? = nil, description: String? = nil, output: OutputSpecInput? = nil, metadata: Metadata? = nil) {
         self.name = name
         self.slug = slug
         self.description = description

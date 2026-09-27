@@ -497,7 +497,8 @@ public struct AutomationParams: Encodable, Sendable {
     public var settleSeconds: Int?
     /// `""` clears it.
     public var preset: String?
-    public var output: OutputSpec?
+    /// Overrides merged over the preset.
+    public var output: OutputSpecInput?
     /// `.some(nil)` clears it.
     public var destination: JobDestination??
     public var afterSuccess: String?
@@ -509,7 +510,7 @@ public struct AutomationParams: Encodable, Sendable {
     public init(
         name: String? = nil, enabled: Bool? = nil, trigger: AutomationTrigger? = nil, triggerConnectionId: String? = nil,
         source: AutomationSource? = nil, pollIntervalSeconds: Int? = nil, settleSeconds: Int? = nil, preset: String? = nil,
-        output: OutputSpec? = nil, destination: JobDestination?? = nil, afterSuccess: String? = nil,
+        output: OutputSpecInput? = nil, destination: JobDestination?? = nil, afterSuccess: String? = nil,
         priority: Priority? = nil, metadata: Metadata? = nil, webhookUrl: String? = nil
     ) {
         self.name = name
