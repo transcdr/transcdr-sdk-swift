@@ -75,6 +75,7 @@ public final class Transcdr: @unchecked Sendable {
     public var connections: ConnectionsResource { .init(client: self) }
     public var automations: AutomationsResource { .init(client: self) }
     public var deliveries: DeliveriesResource { .init(client: self) }
+    public var announcements: AnnouncementsResource { .init(client: self) }
     public var admin: AdminResource { .init(client: self) }
 
     // MARK: Requests

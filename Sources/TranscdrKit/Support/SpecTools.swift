@@ -267,7 +267,7 @@ public enum Catalog {
         "test_mode": "Free test mode", "webhooks": "Signed webhooks", "presets": "Custom presets", "hdr": "HDR10 & HLG",
         "auto_recharge": "Auto-recharge & spend limits", "priority_queue": "Priority queue", "team": "Team members & roles",
         "integrations": "Storage integrations & automations", "sso": "SSO", "dedicated_capacity": "Dedicated capacity",
-        "sla": "Uptime SLA", "invoicing": "Invoicing",
+        "sla": "Uptime SLA", "invoicing": "Invoicing", "unlimited": "Unlimited transcoding at no charge",
     ]
 
     /// Tier of a rendition by its short side.

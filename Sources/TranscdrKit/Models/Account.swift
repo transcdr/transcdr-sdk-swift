@@ -79,6 +79,8 @@ public struct PlanID: OpenEnum {
     public static let growth: Self = "growth"
     public static let scale: Self = "scale"
     public static let enterprise: Self = "enterprise"
+    /// Hidden: never listed or sold; operators assign it. Jobs cost nothing.
+    public static let unlimited: Self = "unlimited"
     public static let all: [Self] = [.free, .payAsYouGo, .starter, .growth, .scale, .enterprise]
     /// Bought as a monthly subscription through checkout.
     public static let subscriptions: [Self] = [.starter, .growth, .scale]

@@ -149,6 +149,18 @@ public enum PlanTools {
         return plan.features.filter { !inherited.contains($0) }
     }
 
+    /// The hidden Unlimited plan: jobs are never refused for credit and cost
+    /// nothing; minutes are still recorded.
+    public static func isUnlimited(_ plan: Plan?) -> Bool {
+        guard let plan else { return false }
+        return plan.id == .unlimited || plan.features.contains("unlimited")
+    }
+
+    public static func isUnlimited(_ organization: Organization?) -> Bool {
+        guard let organization else { return false }
+        return organization.plan == .unlimited || isUnlimited(organization.planDetails)
+    }
+
     /// Self-serve paid plans, in the order the pricing page shows them.
     public static func paidSelfServe(_ plans: [Plan]) -> [Plan] {
         plans.filter { $0.priceCents != nil && $0.id != .free }
