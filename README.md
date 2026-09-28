@@ -100,6 +100,25 @@ _ = try await client.presets.update(id, .init(category: .tv, compatibilityNotes:
 _ = try await client.presets.update(id, .init(clear: [.category, .compatibility, .compatibilityNotes]))
 ```
 
+A rendition's `width` × `height` is the largest it may be, not its exact size.
+The video keeps its shape inside the box, a portrait video turns a landscape
+box portrait, and nothing is enlarged past the source: a 640×480 video through
+a 1920×1080 rendition comes out 640×480 (and bills as SD). Each output reports
+the size it came out at. `fit` is `.contain` (the default), `.cover` (fill and
+centre-crop), `.pad` (black bars to exactly the box) or `.stretch`;
+`upscale: true` allows enlarging. A rendition may set its own `fit`, `upscale`
+and `orientation` (`.fixed` keeps its box as written).
+
+```swift
+let vertical = OutputSpec(
+    renditions: [
+        Rendition(width: 1920, height: 1080),
+        Rendition(width: 1080, height: 1920, fit: .cover, orientation: .fixed),
+    ],
+    fit: .contain
+)
+```
+
 `AudioMode` is `.auto` (the default: compatible audio passes through, the
 rest becomes Opus), `.opus`, `.aac`, `.mp3`, `.flac`, `.alac` or `.drop`.
 

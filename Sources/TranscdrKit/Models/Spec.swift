@@ -119,25 +119,67 @@ public struct BitDepth: OpenEnum {
     public static let all: [Self] = [.auto, .eight, .ten]
 }
 
+/// How the video meets a rendition's box.
+public struct Fit: OpenEnum {
+    public let rawValue: String
+    public init(rawValue: String) { self.rawValue = rawValue }
+    /// Inside the box, keeping the video's shape. The default.
+    public static let contain: Self = "contain"
+    /// Fill the box, keeping the shape, and centre-crop the rest.
+    public static let cover: Self = "cover"
+    /// Keep the shape and add black bars to exactly the box.
+    public static let pad: Self = "pad"
+    /// Distort the picture to exactly the box.
+    public static let stretch: Self = "stretch"
+    public static let all: [Self] = [.contain, .cover, .pad, .stretch]
+}
+
+/// Whether a rendition's box turns to the video's orientation.
+public struct Orientation: OpenEnum {
+    public let rawValue: String
+    public init(rawValue: String) { self.rawValue = rawValue }
+    /// 1920×1080 on a portrait video is used as 1080×1920. The default.
+    public static let auto: Self = "auto"
+    /// The box is used as written.
+    public static let fixed: Self = "fixed"
+    public static let all: [Self] = [.auto, .fixed]
+}
+
+/// One output. `width` × `height` is the largest it may be: the video keeps its
+/// shape inside that box (see `OutputSpec.fit`) and is not enlarged past its own
+/// size unless `upscale` is on. Each output reports the size it came out at.
 public struct Rendition: Codable, Hashable, Sendable {
-    /// Even, 64–7680.
+    /// The maximum width; even, 64–7680.
     public var width: Int
-    /// Even, 64–4320.
+    /// The maximum height; even, 64–4320.
     public var height: Int
     /// This rendition's constant bitrate under `cbr`, e.g. `"3M"` or `"800k"`;
     /// nil takes `quality.bitrate` or the default for its size.
     public var bitrate: String?
-    /// 1–32 of `[A-Za-z0-9_-]`; defaults to `"<short side>p"`.
+    /// 1–32 of `[A-Za-z0-9_-]`; defaults to `"<short side>p"` of the size it comes out at.
     public var label: String?
+    /// This rendition's own fit, over `OutputSpec.fit`.
+    public var fit: Fit?
+    /// `.fixed` keeps this rendition's box as written, e.g. a 9:16 `.cover`
+    /// rendition that crops a landscape video.
+    public var orientation: Orientation?
+    /// This rendition's own upscale, over `OutputSpec.upscale`.
+    public var upscale: Bool?
 
-    public init(width: Int, height: Int, bitrate: String? = nil, label: String? = nil) {
+    public init(
+        width: Int, height: Int, bitrate: String? = nil, label: String? = nil, fit: Fit? = nil,
+        orientation: Orientation? = nil, upscale: Bool? = nil
+    ) {
         self.width = width
         self.height = height
         self.bitrate = bitrate
         self.label = label
+        self.fit = fit
+        self.orientation = orientation
+        self.upscale = upscale
     }
 
-    enum CodingKeys: String, CodingKey { case width, height, bitrate, label }
+    enum CodingKeys: String, CodingKey { case width, height, bitrate, label, fit, orientation, upscale }
 
     public func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
@@ -145,6 +187,9 @@ public struct Rendition: Codable, Hashable, Sendable {
         try c.encode(height, forKey: .height)
         try c.encodeIfPresent(bitrate, forKey: .bitrate)
         try c.encodeIfPresent(label, forKey: .label)
+        try c.encodeIfPresent(fit, forKey: .fit)
+        try c.encodeIfPresent(orientation, forKey: .orientation)
+        try c.encodeIfPresent(upscale, forKey: .upscale)
     }
 }
 
@@ -261,6 +306,10 @@ public struct OutputSpec: Codable, Hashable, Sendable {
     public var mode: OutputMode?
     public var codec: VideoCodec?
     public var renditions: [Rendition]?
+    /// How the video meets each rendition's box; `.contain` unless set.
+    public var fit: Fit?
+    /// Let a rendition be larger than the source; false unless set.
+    public var upscale: Bool?
     public var ladder: Ladder?
     public var quality: Quality?
     public var gop: Int?
@@ -276,7 +325,7 @@ public struct OutputSpec: Codable, Hashable, Sendable {
     public var clear: Set<Field> = []
 
     public enum Field: String, CodingKey, Hashable, Sendable, CaseIterable {
-        case mode, codec, renditions, ladder, quality, gop
+        case mode, codec, renditions, fit, upscale, ladder, quality, gop
         case segmentSeconds = "segment_seconds"
         case audio, subtitles, color
         case bitDepth = "bit_depth"
@@ -288,11 +337,13 @@ public struct OutputSpec: Codable, Hashable, Sendable {
         mode: OutputMode? = nil, codec: VideoCodec? = nil, renditions: [Rendition]? = nil, ladder: Ladder? = nil,
         quality: Quality? = nil, gop: Int? = nil, segmentSeconds: Double? = nil, audio: AudioSettings? = nil,
         subtitles: String? = nil, color: ColorPolicy? = nil, bitDepth: BitDepth? = nil, maxFps: Double? = nil,
-        filters: String? = nil, trim: Trim? = nil
+        filters: String? = nil, trim: Trim? = nil, fit: Fit? = nil, upscale: Bool? = nil
     ) {
         self.mode = mode
         self.codec = codec
         self.renditions = renditions
+        self.fit = fit
+        self.upscale = upscale
         self.ladder = ladder
         self.quality = quality
         self.gop = gop
@@ -311,6 +362,8 @@ public struct OutputSpec: Codable, Hashable, Sendable {
         mode = try c.decodeIfPresent(OutputMode.self, forKey: .mode)
         codec = try c.decodeIfPresent(VideoCodec.self, forKey: .codec)
         renditions = try c.decodeIfPresent([Rendition].self, forKey: .renditions)
+        fit = try c.decodeIfPresent(Fit.self, forKey: .fit)
+        upscale = try c.decodeIfPresent(Bool.self, forKey: .upscale)
         ladder = try c.decodeIfPresent(Ladder.self, forKey: .ladder)
         quality = try c.decodeIfPresent(Quality.self, forKey: .quality)
         gop = try c.decodeIfPresent(Int.self, forKey: .gop)
@@ -332,6 +385,8 @@ public struct OutputSpec: Codable, Hashable, Sendable {
         try put(mode, .mode)
         try put(codec, .codec)
         try put(renditions, .renditions)
+        try put(fit, .fit)
+        try put(upscale, .upscale)
         try put(ladder, .ladder)
         try put(quality, .quality)
         try put(gop, .gop)
@@ -347,13 +402,15 @@ public struct OutputSpec: Codable, Hashable, Sendable {
 
     /// Whether nothing is set (an empty override).
     public var isEmpty: Bool {
-        self == OutputSpec() || (clear.isEmpty && mode == nil && codec == nil && renditions == nil && ladder == nil
+        self == OutputSpec() || (clear.isEmpty && mode == nil && codec == nil && renditions == nil && fit == nil
+            && upscale == nil && ladder == nil
             && quality == nil && gop == nil && segmentSeconds == nil && audio == nil && subtitles == nil
             && color == nil && bitDepth == nil && maxFps == nil && filters == nil && trim == nil)
     }
 
     public static func == (a: OutputSpec, b: OutputSpec) -> Bool {
-        a.mode == b.mode && a.codec == b.codec && a.renditions == b.renditions && a.ladder == b.ladder
+        a.mode == b.mode && a.codec == b.codec && a.renditions == b.renditions && a.fit == b.fit
+            && a.upscale == b.upscale && a.ladder == b.ladder
             && a.quality == b.quality && a.gop == b.gop && a.segmentSeconds == b.segmentSeconds && a.audio == b.audio
             && a.subtitles == b.subtitles && a.color == b.color && a.bitDepth == b.bitDepth && a.maxFps == b.maxFps
             && a.filters == b.filters && a.trim == b.trim && a.clear == b.clear
@@ -401,9 +458,15 @@ public struct MediaInfo: Codable, Hashable, Sendable {
     public var audio: [AudioStream]
     public var subtitles: [SubtitleStream]
     public var sizeBytes: Int64
+    /// Non-square pixels only: the size the picture is shown at (720×576 at
+    /// 64:45 is shown 1024×576).
+    public var displayWidth: Int?
+    public var displayHeight: Int?
 
     enum CodingKeys: String, CodingKey {
         case container, width, height, duration, hdr, rotation, audio, subtitles
+        case displayWidth = "display_width"
+        case displayHeight = "display_height"
         case videoCodec = "video_codec"
         case frameRate = "frame_rate"
         case pixelFormat = "pixel_format"
@@ -426,6 +489,8 @@ public struct MediaInfo: Codable, Hashable, Sendable {
         audio = try c.decodeList([AudioStream].self, forKey: .audio)
         subtitles = try c.decodeList([SubtitleStream].self, forKey: .subtitles)
         sizeBytes = try c.decodeIfPresent(Int64.self, forKey: .sizeBytes) ?? 0
+        displayWidth = try c.decodeIfPresent(Int.self, forKey: .displayWidth)
+        displayHeight = try c.decodeIfPresent(Int.self, forKey: .displayHeight)
     }
 }
 

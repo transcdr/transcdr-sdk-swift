@@ -25,7 +25,8 @@ public enum SpecTools {
     /// The API's defaults.
     public static let defaultSpec = OutputSpec(
         mode: .single, codec: .av1, renditions: [], ladder: nil, quality: Quality(), gop: nil, segmentSeconds: nil,
-        audio: AudioSettings(mode: .auto), subtitles: nil, color: .sdr, bitDepth: .auto, maxFps: nil, filters: nil, trim: nil
+        audio: AudioSettings(mode: .auto), subtitles: nil, color: .sdr, bitDepth: .auto, maxFps: nil, filters: nil, trim: nil,
+        fit: .contain, upscale: false
     )
 
     /// A spec with every field resolved (the defaults where unset), for editing.
@@ -36,6 +37,8 @@ public enum SpecTools {
         out.mode = spec.mode ?? d.mode
         out.codec = spec.codec ?? d.codec
         out.renditions = spec.renditions ?? []
+        out.fit = spec.fit ?? d.fit
+        out.upscale = spec.upscale ?? d.upscale
         out.quality = spec.quality ?? Quality()
         var audio = spec.audio ?? AudioSettings()
         audio.mode = audio.mode ?? .auto
@@ -53,7 +56,10 @@ public enum SpecTools {
     public static func normalize(_ spec: OutputSpec) -> OutputSpec {
         var out = resolved(spec)
         out.renditions = (out.renditions ?? []).map { r in
-            Rendition(width: r.width, height: r.height, bitrate: trimmed(r.bitrate), label: trimmed(r.label))
+            Rendition(
+                width: r.width, height: r.height, bitrate: trimmed(r.bitrate), label: trimmed(r.label), fit: r.fit,
+                orientation: r.orientation, upscale: r.upscale
+            )
         }
         out.quality = Quality(
             target: trimmed(out.quality?.target), crf: out.quality?.crf,
@@ -398,6 +404,8 @@ public enum SpecTools {
         } else {
             parts.append("source resolution")
         }
+        if let fit = spec.fit, fit != .contain { parts.append(fit.rawValue) }
+        if spec.upscale == true { parts.append("upscale") }
         if let color = spec.color, color != .sdr { parts.append(color.rawValue.uppercased()) }
         if let crf = spec.quality?.crf { parts.append("crf \(crf)") }
         else if let q = spec.quality, q.isCbr { parts.append(describeCbr(spec, q)) }
