@@ -62,6 +62,8 @@ public enum SpecTools {
         var audio = out.audio ?? AudioSettings()
         audio.mode = audio.mode ?? .auto
         audio.bitrate = trimmed(audio.bitrate)
+        // The API reads "mp4" as "m4a" and always answers "m4a".
+        if audio.container?.rawValue == "mp4" { audio.container = .m4a }
         out.audio = audio
         if out.mode != .hls { out.segmentSeconds = nil }
         out.subtitles = trimmed(out.subtitles)
@@ -155,9 +157,58 @@ public enum SpecTools {
         32_000, 40_000, 48_000, 56_000, 64_000, 80_000, 96_000, 112_000, 128_000, 160_000, 192_000, 224_000, 256_000, 320_000,
     ]
 
-    /// Whether the spec's audio is MP3: `audio.mode` `mp3`, or audio-only output.
+    /// Whether the spec's audio is MP3: `audio.mode` `mp3`, or `auto` in an audio-only `.mp3`.
     public static func isMp3Output(_ spec: OutputSpec) -> Bool {
-        spec.mode == .audio || spec.audio?.mode == .mp3
+        audioCodec(spec) == .mp3
+    }
+
+    /// The file audio-only output is: the container named, else a `.flac` for FLAC, an
+    /// `.m4a` for ALAC and an `.mp3` for the rest. Nil for output with video.
+    public static func audioContainer(_ spec: OutputSpec) -> AudioContainer? {
+        guard spec.mode == .audio else { return nil }
+        if let named = spec.audio?.container, named != .auto { return named.rawValue == "mp4" ? .m4a : named }
+        switch spec.audio?.mode ?? .auto {
+        case .flac: return .flac
+        case .alac: return .m4a
+        default: return .mp3
+        }
+    }
+
+    /// The codec the output's audio is made in, as its `AudioMode` (`opus`, `mp3`, `aac`,
+    /// `flac` or `alac`); nil when audio is dropped. `auto` is MP3 in an audio-only `.mp3`
+    /// and Opus everywhere else.
+    public static func audioCodec(_ spec: OutputSpec) -> AudioMode? {
+        let mode = spec.audio?.mode ?? .auto
+        if mode == .drop { return nil }
+        if mode == .auto { return audioContainer(spec) == .mp3 ? .mp3 : .opus }
+        return mode
+    }
+
+    /// A codec's name in messages: `AAC`, `Opus`, `MP3`, `FLAC`, `ALAC`.
+    fileprivate static func codecName(_ codec: AudioMode) -> String {
+        codec == .opus ? "Opus" : codec.rawValue.uppercased()
+    }
+
+    /// AAC-LC's rates, bits per second per main channel (the LFE of 5.1 and 7.1 does not count).
+    public static let aacBitratePerChannel = 8_000...288_000
+
+    /// An AAC bitrate's error for a channel layout, with the server's message; nil when
+    /// valid. The source's layout (or one this SDK does not know) takes at least 8k.
+    public static func aacBitrateError(_ bps: Int, channels: AudioChannels) -> String? {
+        let count: Int?
+        switch channels {
+        case .mono: count = 1
+        case .stereo: count = 2
+        case .surround51: count = 6
+        case .surround71: count = 8
+        default: count = nil
+        }
+        guard let count else { return bps >= aacBitratePerChannel.lowerBound ? nil : "AAC takes at least 8k." }
+        let main = count - (count >= 6 ? 1 : 0)
+        let lo = aacBitratePerChannel.lowerBound * main
+        let hi = aacBitratePerChannel.upperBound * main
+        if (lo...hi).contains(bps) { return nil }
+        return "AAC takes 8k to 288k per channel: \(lo / 1000)k to \(min(hi / 1000, 512))k for \(channels.rawValue)."
     }
 
     /// A constant-bitrate rate's error, with the server's messages; nil when valid.
@@ -250,35 +301,56 @@ public enum SpecTools {
         }
         let audioMode = s.audio?.mode ?? .auto
         let channels = s.audio?.channels
+        let codec = audioCodec(s)
         if s.mode == .audio && audioMode == .drop {
-            set("audio.mode", "Audio-only output needs audio: use \"auto\" or \"mp3\".")
+            set("audio.mode", "Audio-only output needs audio: set audio.mode to \"auto\" or a codec.")
         }
-        if s.mode == .audio && audioMode == .opus {
-            set("audio.mode", "Audio-only output is an MP3 file, which cannot hold Opus: use \"auto\" or \"mp3\".")
+        if s.mode != .audio, let container = s.audio?.container, container != .auto {
+            set("audio.container", "container applies only to mode \"audio\": video output is an MP4 or an HLS package.")
+        }
+        if let file = audioContainer(s), let codec {
+            if file == .flac && codec != .flac {
+                set("audio.container", "A .flac file holds FLAC only: set audio.mode to \"flac\", or container to \"m4a\".")
+            } else if file == .mp3 && codec.isLossless {
+                set("audio.container", "An .mp3 file cannot hold lossless audio: set container to \"flac\" or \"m4a\".")
+            } else if file == .mp3 && codec != .mp3 {
+                set("audio.mode", "An .mp3 file cannot hold \(codecName(codec)): use \"auto\" or \"mp3\", or set container to \"m4a\".")
+            }
         }
         if s.mode == .hls && audioMode == .mp3 {
-            set("audio.mode", "MP3 is not available for HLS: use \"auto\" or \"opus\" there, or a single file or audio-only output for MP3.")
+            set("audio.mode", "MP3 is not available for HLS: use \"auto\", \"aac\" or \"opus\" there, or a single file or audio-only output for MP3.")
         }
-        if audioMode == .drop, let channels, channels != .source {
+        if codec == nil, let channels, channels != .source {
             set("audio.channels", "Audio channels mean nothing when audio is dropped.")
         }
-        if isMp3Output(s), channels?.isSurround == true {
+        if codec == .mp3, channels?.isSurround == true {
             set("audio.channels", "MP3 carries two channels at most: choose source, mono or stereo (a surround source is downmixed to stereo).")
         }
         if s.audio?.stereoFallback == true {
             if s.mode != .hls {
                 set("audio.stereo_fallback", "stereo_fallback applies only to mode \"hls\".")
-            } else if audioMode == .drop {
+            } else if codec == nil {
                 set("audio.stereo_fallback", "stereo_fallback means nothing when audio is dropped.")
             } else if channels == .mono || channels == .stereo {
                 set("audio.stereo_fallback", "stereo_fallback adds a stereo rendition beside surround audio, so channels must be source, 5.1 or 7.1.")
             }
         }
+        let lossless = codec?.isLossless == true
+        if let depth = s.audio?.bitDepth, depth != .source, !lossless {
+            set("audio.bit_depth", "bit_depth applies to FLAC and ALAC only.")
+        }
+        if let level = s.audio?.flacCompression, level != .default, codec != .flac {
+            set("audio.flac_compression", "flac_compression applies to FLAC only.")
+        }
         if let bitrate = s.audio?.bitrate {
-            if let bps = parseBitrate(bitrate), (6000...512_000).contains(bps) {
-                if s.audio?.mode == .drop { set("audio.bitrate", "An audio bitrate means nothing when audio is dropped.") }
-                else if isMp3Output(s), !mp3Bitrates.contains(bps) {
+            if lossless {
+                set("audio.bitrate", "FLAC and ALAC are lossless and take no bitrate: remove audio.bitrate.")
+            } else if let bps = parseBitrate(bitrate), (6000...512_000).contains(bps) {
+                if codec == nil { set("audio.bitrate", "An audio bitrate means nothing when audio is dropped.") }
+                else if codec == .mp3, !mp3Bitrates.contains(bps) {
                     set("audio.bitrate", "MP3 is constant bitrate at 32k, 40k, 48k, 56k, 64k, 80k, 96k, 112k, 128k, 160k, 192k, 224k, 256k or 320k.")
+                } else if codec == .aac, let message = aacBitrateError(bps, channels: channels ?? .source) {
+                    set("audio.bitrate", message)
                 }
             } else {
                 set("audio.bitrate", "Audio bitrate must be between 6k and 512k.")
@@ -311,9 +383,11 @@ public enum SpecTools {
     public static func describe(_ spec: OutputSpec?) -> String {
         guard let spec else { return "—" }
         if spec.mode == .audio {
-            var parts = ["MP3 audio"]
+            var parts = ["\(codecName(audioCodec(spec) ?? .mp3)) audio"]
+            if let file = audioContainer(spec), file != .mp3 { parts.append(".\(file.rawValue)") }
             if let bitrate = spec.audio?.bitrate { parts.append(bitrate) }
             if let channels = spec.audio?.channels, channels != .source { parts.append(channels.rawValue) }
+            if let depth = spec.audio?.bitDepth, depth != .source { parts.append("\(depth.rawValue)-bit") }
             return parts.joined(separator: " · ")
         }
         var parts = [spec.mode == .hls ? "HLS" : "MP4", Catalog.codecName(spec.codec ?? .av1)]

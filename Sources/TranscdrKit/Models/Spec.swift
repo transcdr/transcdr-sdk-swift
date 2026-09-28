@@ -7,7 +7,8 @@ public struct OutputMode: OpenEnum {
     public init(rawValue: String) { self.rawValue = rawValue }
     public static let single: Self = "single"
     public static let hls: Self = "hls"
-    /// The audio alone, as one `.mp3` file (label `audio`, width and height 0).
+    /// The audio alone, as one file (label `audio`, width and height 0): an `.mp3`, `.flac`
+    /// or `.m4a`, as `AudioSettings.container` picks.
     public static let audio: Self = "audio"
     public static let all: [Self] = [.single, .hls, .audio]
 }
@@ -24,12 +25,61 @@ public struct VideoCodec: OpenEnum {
 public struct AudioMode: OpenEnum {
     public let rawValue: String
     public init(rawValue: String) { self.rawValue = rawValue }
+    /// Pass compatible audio through and transcode the rest: to Opus, or to MP3 in an
+    /// audio-only `.mp3`.
     public static let auto: Self = "auto"
     public static let opus: Self = "opus"
     /// Constant bit rate MP3, stereo at most, in a single MP4 or audio-only output (not HLS).
     public static let mp3: Self = "mp3"
+    /// AAC-LC, the audio that plays on the most devices (an AAC source passes through).
+    public static let aac: Self = "aac"
+    /// Lossless FLAC (a FLAC source is copied). No bitrate.
+    public static let flac: Self = "flac"
+    /// Lossless ALAC, Apple Lossless (an ALAC source is copied). No bitrate.
+    public static let alac: Self = "alac"
     public static let drop: Self = "drop"
-    public static let all: [Self] = [.auto, .opus, .mp3, .drop]
+    public static let all: [Self] = [.auto, .opus, .mp3, .aac, .flac, .alac, .drop]
+
+    /// FLAC or ALAC.
+    public var isLossless: Bool { self == .flac || self == .alac }
+}
+
+/// The sample depth of FLAC and ALAC output.
+public struct AudioBitDepth: OpenEnum {
+    public let rawValue: String
+    public init(rawValue: String) { self.rawValue = rawValue }
+    /// 16-bit for a 16-bit or lossy source, 24-bit for a deeper one (the default).
+    public static let source: Self = "source"
+    public static let sixteen: Self = "16"
+    public static let twentyFour: Self = "24"
+    public static let all: [Self] = [.source, .sixteen, .twentyFour]
+}
+
+/// FLAC's compression effort: the same audio either way, a smaller file for more work.
+public struct FlacCompression: OpenEnum {
+    public let rawValue: String
+    public init(rawValue: String) { self.rawValue = rawValue }
+    public static let fast: Self = "fast"
+    /// The default.
+    public static let `default`: Self = "default"
+    public static let best: Self = "best"
+    public static let all: [Self] = [.fast, .default, .best]
+}
+
+/// The file audio-only output is.
+public struct AudioContainer: OpenEnum {
+    public let rawValue: String
+    public init(rawValue: String) { self.rawValue = rawValue }
+    /// Follow the codec: a `.flac` for FLAC, an `.m4a` for ALAC, an `.mp3` otherwise
+    /// (`auto` audio is then MP3). The default.
+    public static let auto: Self = "auto"
+    /// `audio.mp3` (`audio/mpeg`): MP3 only.
+    public static let mp3: Self = "mp3"
+    /// `audio.flac` (`audio/flac`): FLAC only.
+    public static let flac: Self = "flac"
+    /// `audio.m4a` (`audio/mp4`): any codec (`auto` audio in an `.m4a` is Opus).
+    public static let m4a: Self = "m4a"
+    public static let all: [Self] = [.auto, .mp3, .flac, .m4a]
 }
 
 /// An audio channel layout. Every layout but `source` downmixes; none upmixes.
@@ -147,23 +197,38 @@ public struct Quality: Codable, Hashable, Sendable {
 public struct AudioSettings: Codable, Hashable, Sendable {
     public var mode: AudioMode?
     /// Bitrate such as `"128k"` (6k–512k). MP3 takes one of `SpecTools.mp3Bitrates`
-    /// (default 128k stereo, 64k mono).
+    /// (default 128k stereo, 64k mono). AAC takes 8k to 288k per main channel (the LFE does
+    /// not count; default 64k mono, 128k stereo, 384k 5.1, 512k 7.1). Not with FLAC or ALAC.
     public var bitrate: String?
     /// The channel layout; nil is the source's.
     public var channels: AudioChannels?
     /// HLS with surround audio: also add a stereo rendition to the same audio group.
     public var stereoFallback: Bool?
+    /// FLAC and ALAC: the output's sample depth; nil is `source`.
+    public var bitDepth: AudioBitDepth?
+    /// FLAC: the compression effort; nil is `default`.
+    public var flacCompression: FlacCompression?
+    /// Audio-only output: the file it is; nil is `auto`.
+    public var container: AudioContainer?
 
-    public init(mode: AudioMode? = nil, bitrate: String? = nil, channels: AudioChannels? = nil, stereoFallback: Bool? = nil) {
+    public init(
+        mode: AudioMode? = nil, bitrate: String? = nil, channels: AudioChannels? = nil, stereoFallback: Bool? = nil,
+        bitDepth: AudioBitDepth? = nil, flacCompression: FlacCompression? = nil, container: AudioContainer? = nil
+    ) {
         self.mode = mode
         self.bitrate = bitrate
         self.channels = channels
         self.stereoFallback = stereoFallback
+        self.bitDepth = bitDepth
+        self.flacCompression = flacCompression
+        self.container = container
     }
 
     enum CodingKeys: String, CodingKey {
-        case mode, bitrate, channels
+        case mode, bitrate, channels, container
         case stereoFallback = "stereo_fallback"
+        case bitDepth = "bit_depth"
+        case flacCompression = "flac_compression"
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -172,6 +237,9 @@ public struct AudioSettings: Codable, Hashable, Sendable {
         try c.encodeIfPresent(bitrate, forKey: .bitrate)
         try c.encodeIfPresent(channels, forKey: .channels)
         try c.encodeIfPresent(stereoFallback, forKey: .stereoFallback)
+        try c.encodeIfPresent(bitDepth, forKey: .bitDepth)
+        try c.encodeIfPresent(flacCompression, forKey: .flacCompression)
+        try c.encodeIfPresent(container, forKey: .container)
     }
 }
 

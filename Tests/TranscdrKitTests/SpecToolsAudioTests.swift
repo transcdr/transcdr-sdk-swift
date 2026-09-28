@@ -73,18 +73,18 @@ final class SpecToolsAudioTests: XCTestCase {
 
         XCTAssertEqual(
             SpecTools.validate(audioOnly(AudioSettings(mode: .drop)))["output.audio.mode"],
-            "Audio-only output needs audio: use \"auto\" or \"mp3\"."
+            "Audio-only output needs audio: set audio.mode to \"auto\" or a codec."
         )
         XCTAssertEqual(
             SpecTools.validate(audioOnly(AudioSettings(mode: .opus)))["output.audio.mode"],
-            "Audio-only output is an MP3 file, which cannot hold Opus: use \"auto\" or \"mp3\"."
+            "An .mp3 file cannot hold Opus: use \"auto\" or \"mp3\", or set container to \"m4a\"."
         )
         var hls = SpecTools.resolved(nil)
         hls.mode = .hls
         hls.audio = AudioSettings(mode: .mp3)
         XCTAssertEqual(
             SpecTools.validate(hls)["output.audio.mode"],
-            "MP3 is not available for HLS: use \"auto\" or \"opus\" there, or a single file or audio-only output for MP3."
+            "MP3 is not available for HLS: use \"auto\", \"aac\" or \"opus\" there, or a single file or audio-only output for MP3."
         )
 
         var single = SpecTools.resolved(nil)

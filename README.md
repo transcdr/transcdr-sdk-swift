@@ -100,24 +100,56 @@ _ = try await client.presets.update(id, .init(category: .tv, compatibilityNotes:
 _ = try await client.presets.update(id, .init(clear: [.category, .compatibility, .compatibilityNotes]))
 ```
 
-`mode: .audio` writes the audio alone as one `.mp3` file (label `audio`,
-width and height 0), billed per output minute at the SD rate; a `single` job
-whose input has no video becomes audio-only by itself. `AudioMode.mp3` is
-constant bit rate MP3 in a single MP4 or audio-only output (not HLS), stereo
-at most, at one of `SpecTools.mp3Bitrates` (default 128k stereo, 64k mono).
+`AudioMode` is `.auto` (the default: compatible audio passes through, the
+rest becomes Opus), `.opus`, `.aac`, `.mp3`, `.flac`, `.alac` or `.drop`.
+
+- `.aac` is AAC-LC, the audio that plays on the most devices: every browser,
+  iPhone, Android phone and TV. An AAC source passes through. It works in a
+  single MP4, HLS and audio-only `.m4a` output. `bitrate` is 8k to 288k per
+  main channel (the LFE of 5.1 and 7.1 does not count); the default is 64k
+  mono, 128k stereo, 384k 5.1 and 512k 7.1.
+- `.flac` and `.alac` are lossless: a source already in that codec is copied,
+  and they take no `bitrate`. Both work in a single MP4, HLS and audio-only
+  output. `bitDepth` is `.source` (the default: 16-bit for a 16-bit or lossy
+  source, 24-bit for a deeper one), `.sixteen` or `.twentyFour`. For FLAC,
+  `flacCompression` is `.fast`, `.default` or `.best`: the same audio either
+  way, a smaller file for more work.
+- `.mp3` is constant bit rate, stereo at most, in a single MP4 or audio-only
+  output (not HLS), at one of `SpecTools.mp3Bitrates` (default 128k stereo,
+  64k mono).
+
+`mode: .audio` writes the audio alone as one file (label `audio`, width and
+height 0), billed per output minute at the SD rate. `container` picks the
+file: `.auto` (the default) follows the codec, a `.flac` for FLAC, an `.m4a`
+for ALAC and an `.mp3` otherwise (`.auto` audio is then MP3); `.m4a` holds any
+codec (`.auto` audio in an `.m4a` is Opus); `.flac` holds FLAC only and `.mp3`
+MP3 only. The file is `audio.mp3` (`audio/mpeg`), `audio.flac` (`audio/flac`)
+or `audio.m4a` (`audio/mp4`); `SpecTools.audioContainer` and
+`SpecTools.audioCodec` say which file and codec a spec makes. `container`
+applies only to `mode: .audio`. A `single` job whose input has no video
+becomes audio-only by itself; with AAC or Opus audio it is an `.m4a`.
+
 `channels` is `.source` (the default), `.mono`, `.stereo`, `.surround51` or
 `.surround71`, downmixing and never upmixing. In HLS with surround audio,
 `stereoFallback: true` adds a stereo rendition to the same audio group.
-`SpecTools.validate` checks these with the server's messages.
+`SpecTools.validate` checks all of these with the server's messages.
 
 ```swift
 let podcast = OutputSpec(mode: .audio, audio: AudioSettings(mode: .mp3, bitrate: "128k", channels: .stereo))
 _ = try await client.jobs.create(.init(input: .asset(asset.id), output: OutputSpecInput(podcast)))
-let surround = OutputSpec(mode: .hls, codec: .h264, audio: AudioSettings(channels: .surround51, stereoFallback: true))
+let m4a = OutputSpec(mode: .audio, audio: AudioSettings(mode: .aac, container: .m4a))
+let master = OutputSpec(mode: .audio, audio: AudioSettings(mode: .flac, bitDepth: .twentyFour, flacCompression: .best))
+let surround = OutputSpec(mode: .hls, codec: .h264, audio: AudioSettings(mode: .aac, channels: .surround51, stereoFallback: true))
 ```
 
-The `audio-mp3-podcast` and `audio-mp3-speech` system presets (category
-`.audio`) are MP3 at 128k stereo and 64k mono.
+Audio system presets (category `.audio`): `audio-mp3-podcast` and
+`audio-mp3-speech` (MP3 at 128k stereo and 64k mono), `audio-aac-m4a` (AAC in
+an `.m4a`) and `audio-alac-m4a` (Apple Lossless in an `.m4a`). In category
+`.archive`, `audio-flac` is a native `.flac` at best compression and
+`archive-av1-flac` is visually lossless AV1 with FLAC audio in one MP4. The
+reach presets (`mp4-h264-compat-1080p`, `mp4-h265-1080p`, `hls-h264-abr`,
+`hls-h264-cbr`, `social-vertical-1080x1920`, `hls-h264-surround` and
+`mp4-h264-surround-1080p`, now in category `.tv`) use AAC audio.
 
 Connections and webhooks never return their secrets: `secrets` lists the ones
 that are set, each with a `fingerprint` that changes when the secret does.
