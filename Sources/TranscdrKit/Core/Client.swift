@@ -14,7 +14,7 @@ public typealias Query = [(String, String?)]
 /// ```
 public final class Transcdr: @unchecked Sendable {
     public static let defaultBaseURL = URL(string: "https://api.transcdr.com")!
-    public static let version = "0.7.0"
+    public static let version = "0.8.0"
 
     public let baseURL: URL
     public let maxRetries: Int

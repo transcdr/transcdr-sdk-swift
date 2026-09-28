@@ -66,6 +66,23 @@ public struct FlacCompression: OpenEnum {
     public static let all: [Self] = [.fast, .default, .best]
 }
 
+/// What an HE-AAC (or HE-AAC v2) source becomes. HE-AAC is decoded only as its AAC-LC core:
+/// spectral band replication and parametric stereo are not decoded, so the core has half the
+/// stream's rate, less bandwidth and, for v2, one channel. AAC-LC sources are decoded in full
+/// whatever it says.
+public struct HeAac: OpenEnum {
+    public let rawValue: String
+    public init(rawValue: String) { self.rawValue = rawValue }
+    /// The default: passed through when only a codec change is asked; its core decoded when
+    /// the job needs PCM (a downmix, an `.mp3` or `.flac` file).
+    public static let auto: Self = "auto"
+    /// Never decoded: a job that would need it decoded fails.
+    public static let passthrough: Self = "passthrough"
+    /// Its core decoded whenever another codec is asked.
+    public static let core: Self = "core"
+    public static let all: [Self] = [.auto, .passthrough, .core]
+}
+
 /// The file audio-only output is.
 public struct AudioContainer: OpenEnum {
     public let rawValue: String
@@ -255,10 +272,13 @@ public struct AudioSettings: Codable, Hashable, Sendable {
     public var flacCompression: FlacCompression?
     /// Audio-only output: the file it is; nil is `auto`.
     public var container: AudioContainer?
+    /// What an HE-AAC source becomes; nil is `auto`. Not with `drop`.
+    public var heAac: HeAac?
 
     public init(
         mode: AudioMode? = nil, bitrate: String? = nil, channels: AudioChannels? = nil, stereoFallback: Bool? = nil,
-        bitDepth: AudioBitDepth? = nil, flacCompression: FlacCompression? = nil, container: AudioContainer? = nil
+        bitDepth: AudioBitDepth? = nil, flacCompression: FlacCompression? = nil, container: AudioContainer? = nil,
+        heAac: HeAac? = nil
     ) {
         self.mode = mode
         self.bitrate = bitrate
@@ -267,6 +287,7 @@ public struct AudioSettings: Codable, Hashable, Sendable {
         self.bitDepth = bitDepth
         self.flacCompression = flacCompression
         self.container = container
+        self.heAac = heAac
     }
 
     enum CodingKeys: String, CodingKey {
@@ -274,6 +295,7 @@ public struct AudioSettings: Codable, Hashable, Sendable {
         case stereoFallback = "stereo_fallback"
         case bitDepth = "bit_depth"
         case flacCompression = "flac_compression"
+        case heAac = "he_aac"
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -285,6 +307,7 @@ public struct AudioSettings: Codable, Hashable, Sendable {
         try c.encodeIfPresent(bitDepth, forKey: .bitDepth)
         try c.encodeIfPresent(flacCompression, forKey: .flacCompression)
         try c.encodeIfPresent(container, forKey: .container)
+        try c.encodeIfPresent(heAac, forKey: .heAac)
     }
 }
 

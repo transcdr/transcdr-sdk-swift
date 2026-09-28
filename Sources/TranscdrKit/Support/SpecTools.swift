@@ -329,6 +329,9 @@ public enum SpecTools {
         if codec == nil, let channels, channels != .source {
             set("audio.channels", "Audio channels mean nothing when audio is dropped.")
         }
+        if codec == nil, let policy = s.audio?.heAac, policy != .auto {
+            set("audio.he_aac", "he_aac means nothing when audio is dropped.")
+        }
         if codec == .mp3, channels?.isSurround == true {
             set("audio.channels", "MP3 carries two channels at most: choose source, mono or stereo (a surround source is downmixed to stereo).")
         }

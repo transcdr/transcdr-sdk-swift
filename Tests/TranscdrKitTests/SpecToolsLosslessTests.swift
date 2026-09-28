@@ -45,6 +45,24 @@ final class SpecToolsLosslessTests: XCTestCase {
         XCTAssertEqual(a.container?.rawValue, "ogg")
     }
 
+    func testHeAac() throws {
+        XCTAssertEqual(HeAac.all.map(\.rawValue), ["auto", "passthrough", "core"])
+        let a = AudioSettings(mode: .opus, channels: .stereo, heAac: .passthrough)
+        XCTAssertEqual(try JSONValue.from(a), ["mode": "opus", "channels": "stereo", "he_aac": "passthrough"])
+        XCTAssertEqual(try JSONDecoder().decode(AudioSettings.self, from: JSONEncoder().encode(a)), a)
+        let unknown = try JSONDecoder().decode(AudioSettings.self, from: Data(#"{"he_aac":"sbr"}"#.utf8))
+        XCTAssertEqual(unknown.heAac?.rawValue, "sbr")
+        XCTAssertEqual(SpecTools.resolved(spec(.single, a)).audio, a)
+
+        XCTAssertEqual(SpecTools.validate(spec(.single, a)), [:])
+        XCTAssertEqual(SpecTools.validate(audioOnly(AudioSettings(mode: .flac, heAac: .core))), [:])
+        XCTAssertEqual(SpecTools.validate(spec(.single, AudioSettings(mode: .drop, heAac: .auto))), [:])
+        XCTAssertEqual(
+            SpecTools.validate(spec(.single, AudioSettings(mode: .drop, heAac: .core)))["output.audio.he_aac"],
+            "he_aac means nothing when audio is dropped."
+        )
+    }
+
     func testResolvedNormalizeAndDiffKeepTheNewFields() {
         let s = audioOnly(AudioSettings(mode: .flac, bitDepth: .twentyFour, flacCompression: .best, container: .flac))
         XCTAssertEqual(SpecTools.resolved(s).audio, s.audio)
