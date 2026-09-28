@@ -7,7 +7,9 @@ public struct OutputMode: OpenEnum {
     public init(rawValue: String) { self.rawValue = rawValue }
     public static let single: Self = "single"
     public static let hls: Self = "hls"
-    public static let all: [Self] = [.single, .hls]
+    /// The audio alone, as one `.mp3` file (label `audio`, width and height 0).
+    public static let audio: Self = "audio"
+    public static let all: [Self] = [.single, .hls, .audio]
 }
 
 public struct VideoCodec: OpenEnum {
@@ -24,8 +26,28 @@ public struct AudioMode: OpenEnum {
     public init(rawValue: String) { self.rawValue = rawValue }
     public static let auto: Self = "auto"
     public static let opus: Self = "opus"
+    /// Constant bit rate MP3, stereo at most, in a single MP4 or audio-only output (not HLS).
+    public static let mp3: Self = "mp3"
     public static let drop: Self = "drop"
-    public static let all: [Self] = [.auto, .opus, .drop]
+    public static let all: [Self] = [.auto, .opus, .mp3, .drop]
+}
+
+/// An audio channel layout. Every layout but `source` downmixes; none upmixes.
+public struct AudioChannels: OpenEnum {
+    public let rawValue: String
+    public init(rawValue: String) { self.rawValue = rawValue }
+    /// The source's layout (the default).
+    public static let source: Self = "source"
+    public static let mono: Self = "mono"
+    public static let stereo: Self = "stereo"
+    /// 5.1 surround; not with MP3.
+    public static let surround51: Self = "5.1"
+    /// 7.1 surround; not with MP3.
+    public static let surround71: Self = "7.1"
+    public static let all: [Self] = [.source, .mono, .stereo, .surround51, .surround71]
+
+    /// 5.1 or 7.1.
+    public var isSurround: Bool { self == .surround51 || self == .surround71 }
 }
 
 public struct ColorPolicy: OpenEnum {
@@ -124,20 +146,32 @@ public struct Quality: Codable, Hashable, Sendable {
 
 public struct AudioSettings: Codable, Hashable, Sendable {
     public var mode: AudioMode?
-    /// Opus bitrate such as `"128k"` (6k–512k).
+    /// Bitrate such as `"128k"` (6k–512k). MP3 takes one of `SpecTools.mp3Bitrates`
+    /// (default 128k stereo, 64k mono).
     public var bitrate: String?
+    /// The channel layout; nil is the source's.
+    public var channels: AudioChannels?
+    /// HLS with surround audio: also add a stereo rendition to the same audio group.
+    public var stereoFallback: Bool?
 
-    public init(mode: AudioMode? = nil, bitrate: String? = nil) {
+    public init(mode: AudioMode? = nil, bitrate: String? = nil, channels: AudioChannels? = nil, stereoFallback: Bool? = nil) {
         self.mode = mode
         self.bitrate = bitrate
+        self.channels = channels
+        self.stereoFallback = stereoFallback
     }
 
-    enum CodingKeys: String, CodingKey { case mode, bitrate }
+    enum CodingKeys: String, CodingKey {
+        case mode, bitrate, channels
+        case stereoFallback = "stereo_fallback"
+    }
 
     public func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
         try c.encodeIfPresent(mode, forKey: .mode)
         try c.encodeIfPresent(bitrate, forKey: .bitrate)
+        try c.encodeIfPresent(channels, forKey: .channels)
+        try c.encodeIfPresent(stereoFallback, forKey: .stereoFallback)
     }
 }
 

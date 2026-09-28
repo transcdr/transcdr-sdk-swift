@@ -19,7 +19,7 @@ transcoding API, for iOS, macOS and server-side Swift (Linux).
 Swift Package Manager:
 
 ```swift
-.package(url: "https://github.com/transcdr/transcdr-sdk-swift", from: "0.3.0")
+.package(url: "https://github.com/transcdr/transcdr-sdk-swift", from: "0.5.0")
 ```
 
 and depend on the `TranscdrKit` product.
@@ -99,6 +99,25 @@ for preset in phones.data {
 _ = try await client.presets.update(id, .init(category: .tv, compatibilityNotes: ["smart_tv": "Tested on our set-top box."]))
 _ = try await client.presets.update(id, .init(clear: [.category, .compatibility, .compatibilityNotes]))
 ```
+
+`mode: .audio` writes the audio alone as one `.mp3` file (label `audio`,
+width and height 0), billed per output minute at the SD rate; a `single` job
+whose input has no video becomes audio-only by itself. `AudioMode.mp3` is
+constant bit rate MP3 in a single MP4 or audio-only output (not HLS), stereo
+at most, at one of `SpecTools.mp3Bitrates` (default 128k stereo, 64k mono).
+`channels` is `.source` (the default), `.mono`, `.stereo`, `.surround51` or
+`.surround71`, downmixing and never upmixing. In HLS with surround audio,
+`stereoFallback: true` adds a stereo rendition to the same audio group.
+`SpecTools.validate` checks these with the server's messages.
+
+```swift
+let podcast = OutputSpec(mode: .audio, audio: AudioSettings(mode: .mp3, bitrate: "128k", channels: .stereo))
+_ = try await client.jobs.create(.init(input: .asset(asset.id), output: OutputSpecInput(podcast)))
+let surround = OutputSpec(mode: .hls, codec: .h264, audio: AudioSettings(channels: .surround51, stereoFallback: true))
+```
+
+The `audio-mp3-podcast` and `audio-mp3-speech` system presets (category
+`.audio`) are MP3 at 128k stereo and 64k mono.
 
 Connections and webhooks never return their secrets: `secrets` lists the ones
 that are set, each with a `fingerprint` that changes when the secret does.

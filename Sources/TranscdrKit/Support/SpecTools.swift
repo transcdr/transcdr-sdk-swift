@@ -37,7 +37,9 @@ public enum SpecTools {
         out.codec = spec.codec ?? d.codec
         out.renditions = spec.renditions ?? []
         out.quality = spec.quality ?? Quality()
-        out.audio = AudioSettings(mode: spec.audio?.mode ?? .auto, bitrate: spec.audio?.bitrate)
+        var audio = spec.audio ?? AudioSettings()
+        audio.mode = audio.mode ?? .auto
+        out.audio = audio
         out.color = spec.color ?? d.color
         out.bitDepth = spec.bitDepth ?? d.bitDepth
         out.clear = []
@@ -57,7 +59,10 @@ public enum SpecTools {
             target: trimmed(out.quality?.target), crf: out.quality?.crf,
             bitrate: trimmed(out.quality?.bitrate), bufferMs: out.quality?.bufferMs
         )
-        out.audio = AudioSettings(mode: out.audio?.mode ?? .auto, bitrate: trimmed(out.audio?.bitrate))
+        var audio = out.audio ?? AudioSettings()
+        audio.mode = audio.mode ?? .auto
+        audio.bitrate = trimmed(audio.bitrate)
+        out.audio = audio
         if out.mode != .hls { out.segmentSeconds = nil }
         out.subtitles = trimmed(out.subtitles)
         out.filters = trimmed(out.filters)
@@ -145,6 +150,16 @@ public enum SpecTools {
         return Int(max(1000, bps))
     }
 
+    /// The rates MP3 is coded at, bits per second (constant bit rate).
+    public static let mp3Bitrates = [
+        32_000, 40_000, 48_000, 56_000, 64_000, 80_000, 96_000, 112_000, 128_000, 160_000, 192_000, 224_000, 256_000, 320_000,
+    ]
+
+    /// Whether the spec's audio is MP3: `audio.mode` `mp3`, or audio-only output.
+    public static func isMp3Output(_ spec: OutputSpec) -> Bool {
+        spec.mode == .audio || spec.audio?.mode == .mp3
+    }
+
     /// A constant-bitrate rate's error, with the server's messages; nil when valid.
     private static func cbrRateError(_ s: String) -> String? {
         guard let bps = parseBitrate(s) else { return "Bitrate must look like 800k, 3M or 2500000." }
@@ -173,7 +188,27 @@ public enum SpecTools {
             let key = "output.\(param)"
             if errors[key] == nil { errors[key] = message }
         }
-        let renditions = s.renditions ?? []
+        if s.mode == .audio {
+            // Audio-only output writes no video.
+            let q = s.quality
+            let video: [(String, Bool)] = [
+                ("renditions", !(s.renditions ?? []).isEmpty),
+                ("ladder", s.ladder != nil),
+                ("quality", q?.target != nil || q?.crf != nil || q?.bitrate != nil || q?.bufferMs != nil),
+                ("gop", s.gop != nil),
+                ("codec", (s.codec ?? .av1) != .av1),
+                ("color", (s.color ?? .sdr) != .sdr),
+                ("bit_depth", (s.bitDepth ?? .auto) != .auto),
+                ("max_fps", s.maxFps != nil),
+                ("filters", s.filters != nil),
+                ("subtitles", s.subtitles != nil),
+            ]
+            for (field, present) in video where present {
+                set(field, "Audio-only output writes no video, so \(field) does not apply.")
+            }
+            if s.trim != nil { set("trim", "A trim is not available for audio-only output.") }
+        }
+        let renditions = s.mode == .audio ? [] : (s.renditions ?? [])
         if renditions.count > 8 { set("renditions", "At most 8 renditions are allowed.") }
         for (i, r) in renditions.enumerated() {
             let at = { (f: String) in "renditions.\(i).\(f)" }
@@ -213,9 +248,38 @@ public enum SpecTools {
         if s.mode == .hls, let seg = s.segmentSeconds, seg < 1 || seg > 20 {
             set("segment_seconds", "segment_seconds must be between 1 and 20.")
         }
+        let audioMode = s.audio?.mode ?? .auto
+        let channels = s.audio?.channels
+        if s.mode == .audio && audioMode == .drop {
+            set("audio.mode", "Audio-only output needs audio: use \"auto\" or \"mp3\".")
+        }
+        if s.mode == .audio && audioMode == .opus {
+            set("audio.mode", "Audio-only output is an MP3 file, which cannot hold Opus: use \"auto\" or \"mp3\".")
+        }
+        if s.mode == .hls && audioMode == .mp3 {
+            set("audio.mode", "MP3 is not available for HLS: use \"auto\" or \"opus\" there, or a single file or audio-only output for MP3.")
+        }
+        if audioMode == .drop, let channels, channels != .source {
+            set("audio.channels", "Audio channels mean nothing when audio is dropped.")
+        }
+        if isMp3Output(s), channels?.isSurround == true {
+            set("audio.channels", "MP3 carries two channels at most: choose source, mono or stereo (a surround source is downmixed to stereo).")
+        }
+        if s.audio?.stereoFallback == true {
+            if s.mode != .hls {
+                set("audio.stereo_fallback", "stereo_fallback applies only to mode \"hls\".")
+            } else if audioMode == .drop {
+                set("audio.stereo_fallback", "stereo_fallback means nothing when audio is dropped.")
+            } else if channels == .mono || channels == .stereo {
+                set("audio.stereo_fallback", "stereo_fallback adds a stereo rendition beside surround audio, so channels must be source, 5.1 or 7.1.")
+            }
+        }
         if let bitrate = s.audio?.bitrate {
             if let bps = parseBitrate(bitrate), (6000...512_000).contains(bps) {
                 if s.audio?.mode == .drop { set("audio.bitrate", "An audio bitrate means nothing when audio is dropped.") }
+                else if isMp3Output(s), !mp3Bitrates.contains(bps) {
+                    set("audio.bitrate", "MP3 is constant bitrate at 32k, 40k, 48k, 56k, 64k, 80k, 96k, 112k, 128k, 160k, 192k, 224k, 256k or 320k.")
+                }
             } else {
                 set("audio.bitrate", "Audio bitrate must be between 6k and 512k.")
             }
@@ -246,6 +310,12 @@ public enum SpecTools {
     /// `HLS · H.264 · 1080p / 720p · CBR 5 / 3 Mb/s`.
     public static func describe(_ spec: OutputSpec?) -> String {
         guard let spec else { return "—" }
+        if spec.mode == .audio {
+            var parts = ["MP3 audio"]
+            if let bitrate = spec.audio?.bitrate { parts.append(bitrate) }
+            if let channels = spec.audio?.channels, channels != .source { parts.append(channels.rawValue) }
+            return parts.joined(separator: " · ")
+        }
         var parts = [spec.mode == .hls ? "HLS" : "MP4", Catalog.codecName(spec.codec ?? .av1)]
         if let r = spec.renditions, !r.isEmpty {
             parts.append(r.map(effectiveLabel).joined(separator: " / "))
