@@ -446,9 +446,12 @@ public struct Automation: Codable, Hashable, Sendable, Identifiable {
     public var source: AutomationSource
     public var pollIntervalSeconds: Int
     public var settleSeconds: Int
+    /// A slug or `pre_…` id (its latest version when the automation triggers), or `slug@N`.
     public var preset: String?
-    /// Overrides merged over the preset.
-    public var output: OutputSpec
+    /// Fields merged over the preset when a job is made (with no preset, the whole spec).
+    public var output: OutputOverrides
+    /// The complete spec `preset` and `output` resolve to now.
+    public var resolvedOutput: OutputSpec?
     public var destination: JobDestination?
     /// `keep` or `delete`.
     public var afterSuccess: String
@@ -467,6 +470,7 @@ public struct Automation: Codable, Hashable, Sendable, Identifiable {
     enum CodingKeys: String, CodingKey {
         case id, name, enabled, trigger, source, preset, output, destination, priority, metadata
         case triggerConnectionId = "trigger_connection_id"
+        case resolvedOutput = "resolved_output"
         case pollIntervalSeconds = "poll_interval_seconds"
         case settleSeconds = "settle_seconds"
         case afterSuccess = "after_success"
@@ -491,7 +495,8 @@ public struct Automation: Codable, Hashable, Sendable, Identifiable {
         pollIntervalSeconds = try c.decodeIfPresent(Int.self, forKey: .pollIntervalSeconds) ?? 300
         settleSeconds = try c.decodeIfPresent(Int.self, forKey: .settleSeconds) ?? 60
         preset = try c.decodeIfPresent(String.self, forKey: .preset)
-        output = (try? c.decodeIfPresent(OutputSpec.self, forKey: .output)) ?? OutputSpec()
+        output = try c.decodeIfPresent(OutputOverrides.self, forKey: .output) ?? [:]
+        resolvedOutput = try c.decodeIfPresent(OutputSpec.self, forKey: .resolvedOutput)
         destination = try c.decodeIfPresent(JobDestination.self, forKey: .destination)
         afterSuccess = try c.decodeIfPresent(String.self, forKey: .afterSuccess) ?? "keep"
         priority = try c.decodeIfPresent(Priority.self, forKey: .priority) ?? .normal
@@ -520,10 +525,10 @@ public struct AutomationParams: Encodable, Sendable {
     public var pollIntervalSeconds: Int?
     /// 0–86400.
     public var settleSeconds: Int?
-    /// `""` clears it.
+    /// A slug, `pre_…` id or `slug@N`; `""` clears it.
     public var preset: String?
-    /// Overrides merged over the preset.
-    public var output: OutputSpecInput?
+    /// Fields merged over the preset (with no preset, the whole spec).
+    public var output: OutputOverrides?
     /// `.some(nil)` clears it.
     public var destination: JobDestination??
     public var afterSuccess: String?
@@ -543,7 +548,7 @@ public struct AutomationParams: Encodable, Sendable {
     public init(
         name: String? = nil, enabled: Bool? = nil, trigger: AutomationTrigger? = nil, triggerConnectionId: String? = nil,
         source: AutomationSource? = nil, pollIntervalSeconds: Int? = nil, settleSeconds: Int? = nil, preset: String? = nil,
-        output: OutputSpecInput? = nil, destination: JobDestination?? = nil, afterSuccess: String? = nil,
+        output: OutputOverrides? = nil, destination: JobDestination?? = nil, afterSuccess: String? = nil,
         priority: Priority? = nil, metadata: Metadata? = nil, webhookUrl: String? = nil, clear: Set<Field> = []
     ) {
         self.name = name

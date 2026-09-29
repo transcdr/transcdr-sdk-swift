@@ -4,7 +4,7 @@ import XCTest
 /// Idempotent creates, preset replace, clearing with null, API key lookup,
 /// secret fingerprints and telling a session from an API key.
 final class DeclarativeTests: XCTestCase {
-    let preset = #"{"object":"preset","id":"pre_1","slug":"mine","name":"Mine","output":{}}"#
+    let preset = #"{"object":"preset","id":"pre_1","slug":"mine","name":"Mine","output":\#(specJSON)}"#
     let fingerprint = #"{"set":true,"fingerprint":"hmac-sha256:3f9a0c1b2d4e"}"#
 
     func testEveryCreateSendsAnIdempotencyKey() async throws {
@@ -12,7 +12,7 @@ final class DeclarativeTests: XCTestCase {
         let t = MockTransport(Array(repeating: MockTransport.json(201, created), count: 8))
         let c = client(t)
         _ = try? await c.assets.create(.init(url: "https://example.com/a.mp4"))
-        _ = try? await c.presets.create(.init(name: "Mine", output: OutputSpecInput(json: [:])))
+        _ = try? await c.presets.create(.init(name: "Mine", output: sampleSpec))
         _ = try? await c.webhooks.create(.https(url: "https://example.com/hook"))
         _ = try? await c.connections.create(.init(name: "c", kind: .s3, config: .init(bucket: "b")))
         _ = try? await c.automations.create(.init(name: "a", source: .init(connectionId: "con_1")))
@@ -35,7 +35,7 @@ final class DeclarativeTests: XCTestCase {
             .failure(URLError(.networkConnectionLost)),
             MockTransport.json(201, preset, headers: ["Idempotent-Replayed": "true"]),
         ])
-        let p = try await client(t).presets.create(.init(name: "Mine", output: OutputSpecInput(json: [:])), idempotencyKey: "preset-mine")
+        let p = try await client(t).presets.create(.init(name: "Mine", output: sampleSpec), idempotencyKey: "preset-mine")
         XCTAssertEqual(p.id, "pre_1")
         XCTAssertEqual(t.sent.count, 3)
         XCTAssertEqual(Set(t.sent.compactMap { $0.header("Idempotency-Key") }), ["preset-mine"])
@@ -54,10 +54,10 @@ final class DeclarativeTests: XCTestCase {
 
     func testPresetReplaceIsPut() async throws {
         let t = MockTransport([MockTransport.json(200, preset)])
-        _ = try await client(t).presets.replace("pre_1", .init(name: "Mine", output: OutputSpecInput(json: [:])))
+        _ = try await client(t).presets.replace("pre_1", .init(name: "Mine", output: sampleSpec))
         XCTAssertEqual(t.sent[0].method, "PUT")
         XCTAssertEqual(t.sent[0].url.path, "/v1/presets/pre_1")
-        XCTAssertEqual(t.sent[0].json, ["name": "Mine", "output": [:]])
+        XCTAssertEqual(t.sent[0].json, ["name": "Mine", "output": try JSONValue.from(sampleSpec)])
         XCTAssertNil(t.sent[0].header("Idempotency-Key"))
     }
 

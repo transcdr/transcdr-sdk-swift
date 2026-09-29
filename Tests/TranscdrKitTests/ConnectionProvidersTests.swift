@@ -544,24 +544,23 @@ final class ConnectionProvidersTests: XCTestCase {
         XCTAssertEqual(AutomationHelpers.triggerLabel(h, queueName: ""), "hook")
     }
 
-    func testEditableSpecPutsOverridesOnThePreset() {
-        var preset = SpecTools.resolved(nil)
-        preset.mode = .hls
-        preset.ladder = Ladder(maxShortSide: 1080)
-        preset.segmentSeconds = 4
-        let override = OutputSpec(codec: .h265, quality: Quality(crf: 28))
-        let spec = AutomationHelpers.editableSpec(override: override, preset: preset)
-        XCTAssertEqual(spec.mode, .hls)
-        XCTAssertEqual(spec.ladder, Ladder(maxShortSide: 1080))
-        XCTAssertEqual(spec.codec, .h265)
-        XCTAssertEqual(spec.quality, Quality(crf: 28))
-        XCTAssertTrue(SpecTools.diff(spec, base: preset).json["mode"] == nil, "the preset's own values are not overrides")
-        XCTAssertEqual(SpecTools.diff(spec, base: preset).json["codec"], "h265")
+    func testEditableSpecPutsOverridesOnThePreset() throws {
+        guard case .video(var hls) = OutputSpecTests.hlsCbr else { return XCTFail() }
+        hls.renditions = .ladder(Ladder(maxShortSide: 1080, fit: .contain, upscale: false))
+        let preset = OutputSpec.video(hls)
+        let override: OutputOverrides = ["video": ["codec": "h265", "crf": 28]]
+        XCTAssertNil(AutomationHelpers.editableSpec(override: override, preset: OutputSpecTests.hlsCbr), "its sizes' rates need cbr")
+        guard case .video(let spec)? = AutomationHelpers.editableSpec(override: override, preset: preset) else { return XCTFail() }
+        XCTAssertEqual(spec.container, .hls(segmentSeconds: 6))
+        XCTAssertEqual(spec.video.codec, .h265)
+        XCTAssertEqual(spec.video.rate, .crf(28), "crf replaces the preset's cbr")
+        let patch = SpecTools.diff(.video(spec), base: preset).json
+        XCTAssertNil(patch["container"], "the preset's own values are not overrides")
+        XCTAssertEqual(patch["video"]?["codec"], "h265")
 
-        XCTAssertEqual(AutomationHelpers.editableSpec(override: OutputSpec(), preset: nil), SpecTools.resolved(nil))
-        var clearing = OutputSpec()
-        clearing.clear = [.ladder]
-        XCTAssertNil(AutomationHelpers.editableSpec(override: clearing, preset: preset).ladder)
+        XCTAssertEqual(AutomationHelpers.editableSpec(override: OutputOverrides(json: try JSONValue.from(preset)), preset: nil), preset)
+        XCTAssertNil(AutomationHelpers.editableSpec(override: [:], preset: nil), "no preset: the overrides are the whole spec")
+        XCTAssertNil(AutomationHelpers.editableSpec(override: ["container": ["segment_seconds": nil]], preset: preset), "incomplete")
     }
 
     func testAutomationDraftParams() throws {
@@ -575,15 +574,15 @@ final class ConnectionProvidersTests: XCTestCase {
         XCTAssertTrue(draft.isComplete)
         XCTAssertEqual(draft.folder, "incoming/")
 
-        let preset = SpecTools.resolved(nil)
-        var spec = preset
-        spec.codec = .h264
-        let create = try json(draft.params(spec: spec, presetSpec: preset, isNew: true))
+        let preset = OutputSpecTests.mp4
+        guard case .video(var v) = preset else { return XCTFail() }
+        v.video.codec = .av1
+        let create = try json(draft.params(spec: .video(v), presetSpec: preset, isNew: true))
         XCTAssertEqual(create["name"], "Ingest")
         XCTAssertEqual(create["source"], ["connection_id": "con_s3", "prefix": "/incoming", "pattern": "**/*"])
         XCTAssertEqual(create["poll_interval_seconds"], 300)
         XCTAssertEqual(create["preset"], "hls-av1-abr")
-        XCTAssertEqual(create["output"], ["codec": "h264"])
+        XCTAssertEqual(create["output"], ["video": ["codec": "av1"]])
         XCTAssertNil(create["destination"], "no destination on create: left out")
         XCTAssertNil(create["trigger_connection_id"])
         XCTAssertNil(create["webhook_url"])
@@ -598,7 +597,7 @@ final class ConnectionProvidersTests: XCTestCase {
         XCTAssertEqual(update["preset"], "", "update: no preset clears it")
         XCTAssertEqual(update["webhook_url"], "")
         XCTAssertEqual(update["trigger_connection_id"], "con_q")
-        XCTAssertEqual(update["output"], [:])
+        XCTAssertEqual(update["output"], try JSONValue.from(preset), "no preset: the whole spec")
 
         draft.trigger = .hook
         draft.destinationId = "con_out"

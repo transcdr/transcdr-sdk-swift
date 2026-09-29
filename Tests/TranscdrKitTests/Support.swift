@@ -48,6 +48,10 @@ final class MockTransport: HTTPTransport, @unchecked Sendable {
     }
 }
 
+/// A complete output spec, as the API returns one.
+let specJSON = #"{"kind":"audio","container":{"format":"mp3"},"audio":{"handling":"encode","codec":"mp3","bitrate":"64k","channels":"mono","he_aac":"auto"},"privacy":{"preset":"strip_all"}}"#
+let sampleSpec = try! TranscdrCoding.decoder.decode(OutputSpec.self, from: Data(specJSON.utf8))
+
 func fixture(_ name: String) throws -> Data {
     guard let url = Bundle.module.url(forResource: name, withExtension: "json", subdirectory: "Fixtures") else {
         throw TranscdrError(kind: .unknown, message: "no fixture \(name)")

@@ -10,11 +10,11 @@ public typealias Query = [(String, String?)]
 ///
 /// ```swift
 /// let client = Transcdr(apiKey: "tdk_live_…")
-/// let job = try await client.jobs.create(.init(input: .url("https://…/talk.mov"), preset: "hls-av1-abr"))
+/// let job = try await client.jobs.create(.init(input: .url("https://…/talk.mov"), spec: .preset("hls-av1-abr", overrides: nil)))
 /// ```
 public final class Transcdr: @unchecked Sendable {
     public static let defaultBaseURL = URL(string: "https://api.transcdr.com")!
-    public static let version = "0.9.0"
+    public static let version = "1.0.0"
 
     public let baseURL: URL
     public let maxRetries: Int

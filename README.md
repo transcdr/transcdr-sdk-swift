@@ -4,22 +4,28 @@ The official Swift SDK for the [Transcdr](https://transcdr.com) video
 transcoding API, for iOS, macOS and server-side Swift (Linux).
 
 - The whole v1 API, one resource per area: jobs, assets and uploads (with
-  progress), presets, webhooks and events, connections and automations,
-  usage and billing, and more.
-- `async`/`await`, typed errors carrying the API's field errors, retries for
-  safe requests, and an idempotency key on every create, so a retried create
-  never makes a duplicate.
+  progress), presets and their versions, webhooks and events, connections and
+  automations, usage and billing, and more.
+- Output spec v2: typed sections in which every required field is
+  non-optional and every exclusive choice is an enum, and the API's
+  required-field table built in, so an incomplete spec is caught before it is
+  sent, with the API's own messages.
+- `async`/`await`, typed errors carrying every field error, retries for safe
+  requests, and an idempotency key on every create, so a retried create never
+  makes a duplicate.
 - Pagination as an `AsyncSequence`.
-- The output-spec helpers the Transcdr apps use: validation with the
-  server's rules, the smallest override against a preset, and a one-line
-  description.
+- The output-spec helpers the Transcdr apps use: validation with the API's
+  rules, the smallest override against a preset, and a one-line description.
+
+Version 1.0 speaks output spec v2 only. Coming from 0.x, see
+[Migrating from v1](#migrating-from-the-v1-output-spec).
 
 ## Install
 
 Swift Package Manager:
 
 ```swift
-.package(url: "https://github.com/transcdr/transcdr-sdk-swift", from: "0.5.0")
+.package(url: "https://github.com/transcdr/transcdr-sdk-swift", from: "1.0.0")
 ```
 
 and depend on the `TranscdrKit` product.
@@ -33,7 +39,7 @@ let client = Transcdr(apiKey: ProcessInfo.processInfo.environment["TRANSCDR_API_
 
 let job = try await client.jobs.create(.init(
     input: .url("https://example.com/talk.mov"),
-    preset: "hls-av1-abr"
+    spec: .preset("hls-av1-abr", overrides: nil)
 ))
 let done = try await client.jobs.waitFor(job.id)
 print(done.status, done.outputs.map(\.label))
@@ -45,7 +51,7 @@ Upload a local file, then transcode it:
 let asset = try await client.uploads.uploadFile(fileURL) { progress in
     print(Int(progress.fraction * 100), "%")
 }
-_ = try await client.jobs.create(.init(input: .asset(asset.id), preset: "web-av1-1080p"))
+_ = try await client.jobs.create(.init(input: .asset(asset.id), spec: .preset("web-av1-1080p", overrides: nil)))
 ```
 
 Walk every page:
@@ -80,167 +86,291 @@ whole preset (`PUT`):
 ```swift
 _ = try await client.automations.update(id, .init(clear: [.destination, .webhookUrl]))
 _ = try await client.webhooks.update(id, .init(clear: [.description, .awsEndpoint]))
-_ = try await client.presets.replace(presetId, .init(name: "Web 1080p", output: OutputSpecInput(spec)))
+_ = try await client.presets.replace(presetId, .init(name: "Web 1080p", output: spec))
 ```
 
-Every preset has a `category` (`.web`, `.mobile`, `.streaming`, `.tv`,
-`.social`, `.audio`, `.archive`, `.image`) and a `compatibility` list of the platforms
-its output plays on (`.web`, `.ios`, `.android`, `.smartTV`, `.legacy`,
-`.editing`). Each platform has a note giving minimum versions and conditions,
-such as audio that has to be AAC in the source. Both are derived from the
-output spec. Your own presets can set them, and clearing them derives them
-again. Both types accept values this SDK doesn't know yet.
+## The output spec
+
+A job's `output` says what it produces, in sections. **Nothing has a
+default**: a spec states every field its kind, container, codec and audio
+handling need, and the SDK never fills one in. `OutputSpec` is an enum with
+one case per kind:
+
+| Kind | Sections |
+|---|---|
+| `.video(VideoOutput)` | `container`, `video`, `audio`, `renditions`, `subtitles`, `trim`, `privacy` |
+| `.audio(AudioOutput)` | `container`, `audio`, `privacy` |
+| `.image(ImageOutput)` | `image`, `renditions`, `privacy` |
+
+Every initializer takes every field, with no default arguments. Choices of
+which exactly one applies are enums, so a spec cannot hold two:
+`VideoRate` (`.quality`, `.crf`, `.cbr`), `Renditions` (`.sizes`, `.ladder`,
+`.sourceSize`), `Subtitles` (`.tracks`, `.languages`), `Gop` (`.frames`,
+`.seconds`, `.segment`), `ImageFrames` (`.poster`, `.count`, `.atSeconds`),
+`Privacy` (`.preset`, `.fields`) and `AudioTrack` (`.auto`, `.encode`, `.drop`).
+
+"Follow the source" is a value you write: `FrameRate.source`,
+`AudioChannels.source`, `"standard"` bitrates, `VideoBitDepth.fromColor`,
+`RenditionLabel.bySize`, `ImageFrames.poster`, `Gop.segment`,
+`SubtitleTracks.all` and `TrimEnd.source`.
+
+An ABR HLS ladder at constant bit rate:
 
 ```swift
-let phones = try await client.presets.list(category: [.mobile], compatibleWith: [.ios, .android])
-for preset in phones.data {
-    print(preset.name, preset.compatibility, preset.note(for: .ios) ?? "")
-}
-_ = try await client.presets.update(id, .init(category: .tv, compatibilityNotes: ["smart_tv": "Tested on our set-top box."]))
-_ = try await client.presets.update(id, .init(clear: [.category, .compatibility, .compatibilityNotes]))
+let hls = OutputSpec.video(VideoOutput(
+    container: .hls(segmentSeconds: 6),
+    video: VideoSettings(
+        codec: .h264, rate: .cbr(ConstantBitRate(bitrate: "standard", bufferMs: 1000)),
+        bitDepth: .eight, color: .sdr, frameRate: .source, gop: .segment, filters: []
+    ),
+    audio: .encode(AudioEncoding(
+        codec: .aac, bitrate: "standard", channels: .source, heAac: .auto,
+        stereoFallback: false, bitDepth: nil, flacCompression: nil
+    )),
+    renditions: .sizes([
+        RenditionSize(label: .bySize, width: 1920, height: 1080, fit: .contain, orientation: .auto, upscale: false, cbrBitrate: "5M"),
+        RenditionSize(label: .bySize, width: 1280, height: 720, fit: .contain, orientation: .auto, upscale: false, cbrBitrate: "3M"),
+    ]),
+    subtitles: .tracks(.all),
+    trim: .whole,
+    privacy: .preset(.stripAll)
+))
+let job = try await client.jobs.create(.init(input: .asset(asset.id), spec: .output(hls)))
+// An automatic ladder instead:
+// renditions: .ladder(Ladder(maxShortSide: 1080, fit: .contain, upscale: false))
 ```
 
-A rendition's `width` × `height` is the largest it may be, not its exact size.
-The video keeps its shape inside the box, a portrait video turns a landscape
-box portrait, and nothing is enlarged past the source: a 640×480 video through
-a 1920×1080 rendition comes out 640×480 (and bills as SD). Each output reports
-the size it came out at. `fit` is `.contain` (the default), `.cover` (fill and
-centre-crop), `.pad` (black bars to exactly the box) or `.stretch`;
-`upscale: true` allows enlarging. A rendition may set its own `fit`, `upscale`
-and `orientation` (`.fixed` keeps its box as written).
+A single vertical MP4, capped at 30 fps:
 
 ```swift
-let vertical = OutputSpec(
-    renditions: [
-        Rendition(width: 1920, height: 1080),
-        Rendition(width: 1080, height: 1920, fit: .cover, orientation: .fixed),
-    ],
-    fit: .contain
-)
+let vertical = OutputSpec.video(VideoOutput(
+    container: .mp4,
+    video: VideoSettings(
+        codec: .h264, rate: .quality("high"), bitDepth: .fromColor, color: .sdr,
+        frameRate: .max(30), gop: .seconds(2), filters: []
+    ),
+    audio: .encode(AudioEncoding(
+        codec: .aac, bitrate: "standard", channels: .source, heAac: .auto,
+        stereoFallback: nil, bitDepth: nil, flacCompression: nil
+    )),
+    renditions: .sizes([
+        RenditionSize(label: .bySize, width: 1080, height: 1920, fit: .cover, orientation: .fixed, upscale: false, cbrBitrate: nil),
+    ]),
+    subtitles: .tracks(.all),
+    trim: .whole,
+    privacy: .preset(.stripAll)
+))
 ```
 
-`AudioMode` is `.auto` (the default: compatible audio passes through, the
-rest becomes Opus), `.opus`, `.aac`, `.mp3`, `.flac`, `.alac` or `.drop`.
-
-- `.aac` is AAC-LC, the audio that plays on the most devices: every browser,
-  iPhone, Android phone and TV. An AAC source passes through. It works in a
-  single MP4, HLS and audio-only `.m4a` output. `bitrate` is 8k to 288k per
-  main channel (the LFE of 5.1 and 7.1 does not count); the default is 64k
-  mono, 128k stereo, 384k 5.1 and 512k 7.1.
-- `.flac` and `.alac` are lossless: a source already in that codec is copied,
-  and they take no `bitrate`. Both work in a single MP4, HLS and audio-only
-  output. `bitDepth` is `.source` (the default: 16-bit for a 16-bit or lossy
-  source, 24-bit for a deeper one), `.sixteen` or `.twentyFour`. For FLAC,
-  `flacCompression` is `.fast`, `.default` or `.best`: the same audio either
-  way, a smaller file for more work.
-- `.mp3` is constant bit rate, stereo at most, in a single MP4 or audio-only
-  output (not HLS), at one of `SpecTools.mp3Bitrates` (default 128k stereo,
-  64k mono).
-
-AAC sources are decoded, so they can be downmixed or made Opus, MP3, FLAC or
-ALAC; they still pass through wherever nothing asks for a change. HE-AAC is
-decoded only as its AAC-LC core (no spectral band replication or parametric
-stereo: half the rate, less bandwidth), and `heAac` says what an HE-AAC
-source becomes: `.auto` (the default) passes it through when only a codec
-change is asked and decodes its core when the job needs PCM (a downmix, an
-`.mp3` or `.flac` file); `.passthrough` never decodes it, failing a job that
-would need it; `.core` decodes its core whenever another codec is asked.
-AAC-LC sources are decoded in full whatever it says.
-
-`mode: .audio` writes the audio alone as one file (label `audio`, width and
-height 0), billed per output minute at the SD rate. `container` picks the
-file: `.auto` (the default) follows the codec, a `.flac` for FLAC, an `.m4a`
-for ALAC and an `.mp3` otherwise (`.auto` audio is then MP3); `.m4a` holds any
-codec (`.auto` audio in an `.m4a` is Opus); `.flac` holds FLAC only and `.mp3`
-MP3 only. The file is `audio.mp3` (`audio/mpeg`), `audio.flac` (`audio/flac`)
-or `audio.m4a` (`audio/mp4`); `SpecTools.audioContainer` and
-`SpecTools.audioCodec` say which file and codec a spec makes. `container`
-applies only to `mode: .audio`. A `single` job whose input has no video
-becomes audio-only by itself; with AAC or Opus audio it is an `.m4a`.
-
-`channels` is `.source` (the default), `.mono`, `.stereo`, `.surround51` or
-`.surround71`, downmixing and never upmixing. In HLS with surround audio,
-`stereoFallback: true` adds a stereo rendition to the same audio group.
-`SpecTools.validate` checks all of these with the server's messages.
+An audio-only MP3:
 
 ```swift
-let podcast = OutputSpec(mode: .audio, audio: AudioSettings(mode: .mp3, bitrate: "128k", channels: .stereo))
-_ = try await client.jobs.create(.init(input: .asset(asset.id), output: OutputSpecInput(podcast)))
-let m4a = OutputSpec(mode: .audio, audio: AudioSettings(mode: .aac, container: .m4a))
-let master = OutputSpec(mode: .audio, audio: AudioSettings(mode: .flac, bitDepth: .twentyFour, flacCompression: .best))
-let surround = OutputSpec(mode: .hls, codec: .h264, audio: AudioSettings(mode: .aac, channels: .surround51, stereoFallback: true))
-let stereoOpus = OutputSpec(mode: .single, codec: .h264, audio: AudioSettings(mode: .opus, channels: .stereo, heAac: .passthrough))
+let podcast = OutputSpec.audio(AudioOutput(
+    container: .mp3,
+    audio: .encode(AudioEncoding(
+        codec: .mp3, bitrate: "64k", channels: .mono, heAac: .auto,
+        stereoFallback: nil, bitDepth: nil, flacCompression: nil
+    )),
+    privacy: .preset(.stripAll)
+))
 ```
 
-Audio system presets (category `.audio`): `audio-mp3-podcast` and
-`audio-mp3-speech` (MP3 at 128k stereo and 64k mono), `audio-aac-m4a` (AAC in
-an `.m4a`) and `audio-alac-m4a` (Apple Lossless in an `.m4a`). In category
-`.archive`, `audio-flac` is a native `.flac` at best compression and
-`archive-av1-flac` is visually lossless AV1 with FLAC audio in one MP4. The
-reach presets (`mp4-h264-compat-1080p`, `mp4-h265-1080p`, `hls-h264-abr`,
-`hls-h264-cbr`, `social-vertical-1080x1920`, `hls-h264-surround` and
-`mp4-h264-surround-1080p`, now in category `.tv`) use AAC audio.
+Twelve JPEG stills of a video:
 
-Connections and webhooks never return their secrets: `secrets` lists the ones
-that are set, each with a `fingerprint` that changes when the secret does.
-`auth.me()` returns a `user` for API keys too (the key's creator); `me.isSession`
-tells a session from an API key.
+```swift
+let stills = OutputSpec.image(ImageOutput(
+    image: ImageSettings(formats: [.jpeg], lossless: nil, quality: [.jpeg: 80], colorProfile: .srgb, frames: .count(12)),
+    renditions: .sizes([
+        RenditionSize(label: "sheet", width: 320, height: 320, fit: .contain, orientation: .auto, upscale: false, cbrBitrate: nil),
+    ]),
+    privacy: .preset(.stripAll)
+))
+```
 
-Errors are `TranscdrError`, with `kind`, `status`, `code`, `param` and
-`fieldErrors` for validation failures.
+### Fields that depend on others
+
+Some fields apply only under a condition, and are optional in the types:
+
+| Field | Required when |
+|---|---|
+| `Container.segmentSeconds` | format `hls` (1–20) |
+| `AudioEncoding.bitrate` | codec `opus`, `mp3` or `aac` |
+| `AudioEncoding.stereoFallback` | container `hls` |
+| `AudioEncoding.bitDepth` | codec `flac` or `alac` |
+| `AudioEncoding.flacCompression` | codec `flac` |
+| `ImageSettings.lossless` | `webp` among the formats |
+| `ImageSettings.quality` | a lossy format is made: one entry per lossy format |
+| `RenditionSize.cbrBitrate` | optional, with `.cbr` only |
+
+A field is refused where it does not apply. `OutputRules` holds the API's
+required-field table (the same one `GET /v1/capabilities` lists under
+`output`), and `spec.missingFields` checks a spec against it, reporting
+every problem at once with the API's params and messages.
+`jobs.create`, `presets.create` and `presets.replace` run that check on a
+whole spec and throw `TranscdrError` (code `validation_failed`, every
+problem in `errors`) without sending the request.
+`SpecTools.validate(_:maxShortSide:maxSizes:)` goes on to check the values
+against each other and the plan's limits (HDR needs 10-bit, an `.mp3` holds
+MP3 only, even sizes), as the API does.
+
+```swift
+for problem in hls.missingFields { print(problem.param, problem.message) }
+```
+
+### Presets, versions and overrides
+
+A preset is a complete spec, and presets are versioned: editing one's output
+adds a version, and a version never changes. Name one by slug or id for its
+latest version, or `slug@N` for version N. With a preset, `overrides` give
+only what to change: objects merge key by key, scalars and arrays replace,
+one choice of an exclusive group replaces the others, `null` removes a field,
+and `kind` cannot change. The result must be complete.
+
+```swift
+let job = try await client.jobs.create(.init(
+    input: .asset(asset.id),
+    spec: .preset("social-vertical-1080x1920@1", overrides: ["video": ["frame_rate": ["max": 24]]])
+))
+print(job.preset?.id, job.preset?.version, job.preset?.overrides)  // where the spec came from
+print(job.output)  // the resolved, complete spec: what runs
+
+let versions = try await client.presets.versions("my-preset")
+let v2 = try await client.presets.version("my-preset", 2)
+```
+
+`SpecTools.diff(spec, base: preset.output)` is the smallest override that
+turns a preset's spec into `spec`, and `SpecTools.merge(overrides, over:)`
+applies one with the API's rules. An automation stores a preset reference and
+overrides; `automation.resolvedOutput` is the spec they resolve to now.
+
+### Audio
+
+`AudioTrack` is `.auto` (keep the source's audio where the container carries
+it, make the rest `codec`, which is Opus, or MP3 in an `.mp3`), `.encode`
+(make `codec`; a source already in it is copied) or `.drop` (video only).
+
+- `aac` is AAC-LC, the audio that plays on the most devices. `bitrate` is 8k
+  to 288k per main channel (the LFE does not count), or `"standard"`: 64k
+  mono, 128k stereo, 384k 5.1, 512k 7.1.
+- `mp3` is constant bit rate, stereo at most, for an MP4 or an `.mp3`, not
+  HLS, at one of `SpecTools.mp3Bitrates`.
+- `flac` and `alac` are lossless and take no bitrate; `bitDepth` is
+  `.source`, `.sixteen` or `.twentyFour`; `flacCompression` is `.fast`,
+  `.balanced` or `.best`, the same audio either way.
+- `channels` sets the layout, or `.source` to keep the source's; it never
+  upmixes. `stereoFallback` (HLS) adds a stereo rendition beside surround
+  audio.
+- `heAac` says what an HE-AAC source becomes. HE-AAC is decoded only as its
+  AAC-LC core: `.auto` keeps it where only a codec change is asked and decodes
+  its core where the job needs PCM; `.passthrough` never decodes it; `.core`
+  decodes its core whenever another codec is asked.
+
+`.audio` output writes one file labelled `audio`: `container` `.mp3` (MP3
+only), `.flac` (FLAC only) or `.m4a` (any codec).
+
+### Sizes
+
+A size's `width` × `height` is the largest the output may be, not its exact
+size. `fit` is `.contain` (inside the box), `.cover` (fill and centre-crop),
+`.pad` (black bars to exactly the box) or `.stretch`. `orientation: .auto`
+turns the box to the picture's orientation; `.fixed` uses it as written.
+Nothing is enlarged past the source unless `upscale` is true. Each output
+reports the size it came out at.
 
 ### Image jobs
 
-`mode: .image` makes still images, of an image input (JPEG, PNG, WebP, AVIF,
-GIF, TIFF, BMP, HEIC) or taken from a video. Every rendition is made in every
-format of `ImageSettings.formats`: `.avif` (the default), `.webp`, `.jpeg` and
-`.png`, one to four of them. Image renditions are 16 to 8192 on a side, odd
-sizes allowed, and fit as video renditions do.
+`.image` output makes still images of an image input (JPEG, PNG, WebP, AVIF,
+GIF, TIFF, BMP, HEIC) or of a video. Every size is made in every format:
+`.avif`, `.webp`, `.jpeg`, `.png`. `quality` names each lossy format made;
+`lossless` is WebP's (PNG always is). `colorProfile` is `.srgb` or `.keep`.
+`frames` is `.poster` (an image as it is, a video's frame 10% in), `.count(N)`
+or `.atSeconds([...])`. Images are billed per output image by pixel count
+(`billing.billableImages`, `billing.tier`).
 
-- `quality` (1 to 100) applies to the lossy formats; nil is each one's own
-  default (AVIF 60, WebP 80, JPEG 82). `lossless: true` makes WebP lossless;
-  PNG always is.
-- Outputs are upright, sRGB unless `keepColorProfile: true`, and never carry
-  EXIF, XMP or GPS.
-- From a video, `frames` picks the stills: `ImageFrames(atSeconds: [1.5, 10])`
-  or `ImageFrames(count: 12)` evenly spaced. Nil is one frame 10% of the way in.
-- Each `JobOutput` carries its `format`, its `rendition`, and for a video's
-  stills its `frame` (from 1) and `atSeconds`.
-- Images are billed per output image by the pixels it came out at:
-  `billing.billableImages` counts them and `billing.tier` is `.upTo1mp`,
-  `.upTo4mp` or `.over4mp` (`Tier.imageTiers`). The prices are `imageRates`
-  on a `Plan` and on `Billing`.
+### Privacy
 
-`SpecTools.validate` checks image specs with the server's messages too.
+`privacy` is `.preset(.stripAll)`, `.preset(.stripLocation)`,
+`.preset(.keepAll)`, or `.fields(PrivacyFields(location:captureTime:device:descriptive:))`
+stating every category. Responses state every category.
 
-```swift
-// A photo as AVIF with a JPEG fallback, at two sizes.
-let photo = OutputSpec(
-    mode: .image,
-    renditions: [Rendition(width: 1920, height: 1920), Rendition(width: 640, height: 640, label: "small")],
-    image: ImageSettings(formats: [.avif, .jpeg], quality: 70)
-)
-let job = try await client.jobs.create(.init(input: .asset(asset.id), output: OutputSpecInput(photo)))
+### Errors
 
-// Twelve evenly spaced JPEG stills of a video.
-let stills = OutputSpec(
-    mode: .image,
-    renditions: [Rendition(width: 480, height: 270)],
-    image: ImageSettings(formats: [.jpeg], frames: ImageFrames(count: 12))
-)
+Errors are `TranscdrError`, with `kind`, `status`, `code`, `param` and
+`message`. A refused output spec lists every problem in `errors`
+(`[FieldError]`, each a `param` and a `message`), missing fields first;
+`fieldErrors` gives them by param.
 
-let done = try await client.jobs.waitFor(job.id)
-for output in done.outputs {
-    print(output.rendition ?? "", output.format?.rawValue ?? "", output.url)
-}
-print(done.billing?.billableImages ?? 0, done.billing?.tier?.rawValue ?? "")
-```
+## Migrating from the v1 output spec
 
-Image system presets (category `.image`): `web-avif` and `web-webp` (1920,
-1280 and 640 wide), `thumbnail-jpeg`, `png-lossless`, `video-poster` (AVIF and
-JPEG of the frame 10% in) and `contact-sheet` (12 evenly spaced JPEG stills of
-a video). `Capabilities` lists the `imageFormats`, the `inputImageFormats` and
-`imageLimits`.
+1.0 replaces the flat v1 `OutputSpec` (`mode`, `codec`, `quality`,
+`renditions` as a list, `audio.mode`, top-level `fit` and `upscale`, …) with
+the sections above, and the API returns v2 in every response. In code:
+
+- `JobCreateParams(input:output:preset:)` is now `JobCreateParams(input:spec:)`
+  with `.preset(ref, overrides:)` or `.output(spec)`.
+- `OutputSpecInput` is `OutputOverrides` (a JSON merge patch) for overrides;
+  a whole spec is an `OutputSpec`. `presets.create` takes
+  `PresetCreateParams`, whose `output` is a complete `OutputSpec`.
+- `SpecTools.defaultSpec`, `resolved` and `normalize` are gone: there are no
+  defaults to fill in. `SpecTools.validate` returns `[FieldError]`.
+- `AudioSettings`, `Quality`, `Rendition`, `OutputMode`, `AudioMode`,
+  `AudioContainer` and `BitDepth` are replaced by the section types.
+
+Every v1 field has an exact v2 form. Where v1 had a default, write it out:
+
+| v1 | v2 | v1 default, written out |
+|---|---|---|
+| `mode: single` | `kind: video`, `container.format: mp4` | `single` |
+| `mode: hls` | `kind: video`, `container.format: hls` | |
+| `segment_seconds` | `container.segment_seconds` | `4` |
+| `mode: audio` | `kind: audio` | |
+| `audio.container` | `container.format` (`mp4` read as `m4a`) | `auto` → `flac` for flac, `m4a` for alac, else `mp3` |
+| `mode: image` | `kind: image` | |
+| `codec` | `video.codec` | `av1` |
+| `quality.target` (a level) | `video.quality` | none set → `quality: "standard"` |
+| `quality.crf` | `video.crf` (a level `target` is dropped: crf won) | |
+| `quality.target: cbr` | `video.cbr` | |
+| `quality.bitrate` | `video.cbr.bitrate` | `"standard"` |
+| `quality.buffer_ms` | `video.cbr.buffer_ms` | `1000` |
+| `bit_depth` | `video.bit_depth` (`auto` → `from_color`) | `from_color` |
+| `color` | `video.color` | `sdr` |
+| `max_fps` | `video.frame_rate.max` | `"source"` |
+| `gop` | `video.gop.frames` | mp4: `{ seconds: 2 }`; hls: `"segment"` |
+| `filters: "a,b"` | `video.filters: ["a", "b"]` | `[]` |
+| `renditions[]` | `renditions.sizes[]` | none and no ladder → `source_size`, with the top-level `fit` and `upscale` |
+| `renditions[].label` | `sizes[].label` | `by_size` |
+| `renditions[].fit` / `upscale` | `sizes[].fit` / `upscale` | the top-level `fit` / `upscale`, which default to `contain` / `false` |
+| `renditions[].orientation` | `sizes[].orientation` | `auto` |
+| `renditions[].bitrate` | `sizes[].video.cbr.bitrate` | |
+| `fit`, `upscale` (top level) | written onto every size, the ladder or the source size; dropped for audio | `contain`, `false` |
+| `ladder` | `renditions.ladder` (dropped when `renditions` is non-empty, as v1 ignored it) | `max_short_side` → `1080` |
+| `audio.mode: auto` | `handling: auto`, `codec: opus` (`mp3` in an mp3 container) | |
+| `audio.mode: opus` \| `mp3` \| `aac` \| `flac` \| `alac` | `handling: encode`, `codec` | |
+| `audio.mode: drop` | `handling: drop` | |
+| `audio.bitrate` | `audio.bitrate` | `"standard"` (lossy) |
+| `audio.channels` | `audio.channels` | `source` |
+| `audio.he_aac` | `audio.he_aac` | `auto` |
+| `audio.stereo_fallback` | `audio.stereo_fallback` | `false` (hls) |
+| `audio.bit_depth` | `audio.bit_depth` | `source` (flac/alac) |
+| `audio.flac_compression` | `audio.flac_compression` (`default` → `balanced`) | `balanced` (flac) |
+| `subtitles: all\|none` | `subtitles.tracks` | `all` |
+| `subtitles: "eng,deu"` | `subtitles.languages` | |
+| `trim` | `trim` | `{ start: 0, end: "source" }`; `end` unset → `"source"` |
+| `image.formats` | `image.formats` | `["avif"]` |
+| `image.quality: 70` | `image.quality: { <each lossy format>: 70 }` | avif 60, webp 80, jpeg 82 |
+| `image.lossless` | `image.lossless` | `false` (webp) |
+| `image.keep_color_profile` | `image.color_profile: keep \| srgb` | `srgb` |
+| `image.frames` | `image.frames` | `"poster"` |
+| `privacy` | `privacy`, all four fields resolved | `{ preset: "strip_all" }` |
+
+**Older SDK versions keep working** until the compatibility mode's sunset. The
+API still accepts v1 requests, with v1's defaults. Responses are v2, which a
+0.x `OutputSpec` reads as an empty spec; the API's compatibility mode returns
+`output` in the v1 shape instead, when a request carries the
+`Transcdr-Output-Spec: v1` header (or `?output_spec=v1` on a `GET`). With 0.x,
+send that header through your `HTTPTransport`. The mode is deprecated from the
+start (its responses carry `Deprecation` and `Sunset` headers) and is removed
+after 31 March 2027: move to 1.0 before then.
 
 ## Requirements
 

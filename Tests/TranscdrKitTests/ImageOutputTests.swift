@@ -2,52 +2,12 @@ import XCTest
 @testable import TranscdrKit
 
 final class ImageOutputTests: XCTestCase {
-    private func image(_ settings: ImageSettings?, renditions: [Rendition] = [Rendition(width: 1920, height: 1920)]) -> OutputSpec {
-        OutputSpec(mode: .image, renditions: renditions, image: settings)
-    }
-
-    func testImageSpecEncodesAsSentAndRoundTrips() throws {
-        let spec = image(
-            ImageSettings(
-                formats: [.avif, .jpeg], quality: 70, lossless: false, keepColorProfile: true,
-                frames: ImageFrames(atSeconds: [1.5, 10])
-            ),
-            renditions: [Rendition(width: 1920, height: 1920), Rendition(width: 641, height: 17, label: "small")]
-        )
-        XCTAssertEqual(
-            try JSONValue.from(spec),
-            [
-                "mode": "image",
-                "renditions": [["width": 1920, "height": 1920], ["width": 641, "height": 17, "label": "small"]],
-                "image": [
-                    "formats": ["avif", "jpeg"],
-                    "quality": 70,
-                    "lossless": false,
-                    "keep_color_profile": true,
-                    "frames": ["at_seconds": [1.5, 10]],
-                ],
-            ]
-        )
-        XCTAssertEqual(try JSONDecoder().decode(OutputSpec.self, from: JSONEncoder().encode(spec)), spec)
-        // Unset fields are left out, and so is `image` when it is nil.
-        XCTAssertEqual(try JSONValue.from(ImageSettings(frames: ImageFrames(count: 12))), ["frames": ["count": 12]])
-        XCTAssertNil(try JSONValue.from(OutputSpec(mode: .single)).objectValue?["image"])
-        var cleared = OutputSpec(mode: .single)
-        cleared.clear = [.image]
-        XCTAssertEqual(try JSONValue.from(cleared), ["mode": "single", "image": nil])
-        XCTAssertFalse(OutputSpec(image: ImageSettings()).isEmpty)
-
-        XCTAssertEqual(OutputMode.all.last, .image)
-        XCTAssertEqual(ImageFormat.all.map(\.rawValue), ["avif", "webp", "jpeg", "png"])
-        XCTAssertEqual(Tier.imageTiers.map(\.rawValue), ["up_to_1mp", "up_to_4mp", "over_4mp"])
-        XCTAssertEqual(PresetCategory.all.last, .image)
-    }
-
     func testImageJobDecodes() throws {
         let json = #"""
         {"object":"job","id":"job_1","status":"completed","input":{"type":"asset","asset_id":"ast_1"},
-         "output":{"mode":"image","renditions":[{"width":640,"height":640,"label":"small"}],"fit":"contain","upscale":false,
-                   "image":{"formats":["avif","jpeg"],"frames":{"count":2}}},
+         "output":{"kind":"image","renditions":{"sizes":[{"label":"small","width":640,"height":640,"fit":"contain","orientation":"auto","upscale":false}]},
+                   "image":{"formats":["avif","jpeg"],"quality":{"avif":60,"jpeg":82},"color_profile":"srgb","frames":{"count":2}},
+                   "privacy":{"location":"strip","capture_time":"strip","device":"strip","descriptive":"strip"}},
          "progress":{"percent":100,"stage":"done","renditions":[]},
          "outputs":[
            {"label":"small-001.avif","width":640,"height":480,"frames":1,"bytes":21000,"content_type":"image/avif",
@@ -59,9 +19,11 @@ final class ImageOutputTests: XCTestCase {
          "created_at":"2026-09-29T00:00:00Z","updated_at":"2026-09-29T00:00:10Z"}
         """#
         let job = try TranscdrCoding.decoder.decode(Job.self, from: Data(json.utf8))
-        XCTAssertEqual(job.output.mode, .image)
-        XCTAssertEqual(job.output.image?.formats, [.avif, .jpeg])
-        XCTAssertEqual(job.output.image?.frames?.count, 2)
+        guard case .image(let image) = job.output else { return XCTFail("not an image spec") }
+        XCTAssertEqual(image.image.formats, [.avif, .jpeg])
+        XCTAssertEqual(image.image.quality, [.avif: 60, .jpeg: 82])
+        XCTAssertEqual(image.image.frames, .count(2))
+        XCTAssertEqual(SpecTools.imageOutputCount(image), 4)
         XCTAssertEqual(job.outputs.count, 2)
         let still = job.outputs[1]
         XCTAssertEqual(still.format, .jpeg)
@@ -74,7 +36,7 @@ final class ImageOutputTests: XCTestCase {
 
         // A video job from an older server has none of the image fields.
         let video = try decodeFixture("job", as: Job.self)
-        XCTAssertNil(video.output.image)
+        XCTAssertEqual(video.output.kind, .video)
         XCTAssertNil(video.billing?.billableImages)
         XCTAssertNil(video.outputs.first?.format)
         XCTAssertNil(video.outputs.first?.frame)
@@ -129,107 +91,5 @@ final class ImageOutputTests: XCTestCase {
         let oldUsage = try decodeFixture("usage", as: Usage.self)
         XCTAssertEqual(oldUsage.totals.billableImages, 0)
         XCTAssertTrue(oldUsage.byImageTier.isEmpty)
-    }
-
-    func testValidateImageSpecs() {
-        // Image renditions may be odd and 16–8192 on a side; the video defaults are not "set".
-        let ok = image(
-            ImageSettings(formats: [.avif, .jpeg], quality: 70),
-            renditions: [Rendition(width: 8192, height: 17), Rendition(width: 641, height: 16, label: "small")]
-        )
-        XCTAssertEqual(SpecTools.validate(SpecTools.resolved(ok)), [:])
-        XCTAssertEqual(SpecTools.validate(image(nil, renditions: [])), [:])
-
-        let errors = SpecTools.validate(image(nil, renditions: [
-            Rendition(width: 15, height: 9000), Rendition(width: 640, height: 640, bitrate: "3M"),
-        ]))
-        XCTAssertEqual(errors["output.renditions.0.width"], "An image rendition's width must be between 16 and 8192.")
-        XCTAssertEqual(errors["output.renditions.0.height"], "An image rendition's height must be between 16 and 8192.")
-        XCTAssertEqual(errors["output.renditions.1.bitrate"], "An image rendition has no bitrate.")
-        XCTAssertEqual(
-            SpecTools.validate(image(nil, renditions: [Rendition(width: 640, height: 640), Rendition(width: 640, height: 640)]))["output.renditions"],
-            "Two renditions share a label; give them distinct labels."
-        )
-
-        var video = image(nil)
-        video.codec = .h264
-        video.trim = Trim(start: 2)
-        video.audio = AudioSettings(mode: .aac)
-        let refused = SpecTools.validate(video)
-        XCTAssertEqual(refused["output.codec"], "Image output makes still images, so codec does not apply.")
-        XCTAssertEqual(refused["output.trim"], "Image output makes still images, so trim does not apply.")
-        XCTAssertEqual(refused["output.audio"], "Image output makes still images, so audio does not apply.")
-
-        func error(_ settings: ImageSettings, _ key: String) -> String? {
-            SpecTools.validate(image(settings))["output.\(key)"]
-        }
-        XCTAssertEqual(error(ImageSettings(formats: []), "image.formats"), "Give one to four formats: avif, webp, jpeg, png.")
-        XCTAssertEqual(error(ImageSettings(formats: [.webp, .webp]), "image.formats"), "webp is listed twice.")
-        XCTAssertEqual(
-            error(ImageSettings(formats: [.webp, .jpeg], lossless: true), "image.lossless"),
-            "lossless applies to webp (png is always lossless); jpeg has no lossless form."
-        )
-        XCTAssertNil(error(ImageSettings(formats: [.webp, .png], lossless: true), "image.lossless"))
-        XCTAssertEqual(error(ImageSettings(quality: 0), "image.quality"), "quality must be between 1 and 100.")
-        XCTAssertEqual(
-            error(ImageSettings(formats: [.png], quality: 80), "image.quality"),
-            "quality applies to lossy formats (avif, webp, jpeg), and none is being made."
-        )
-        XCTAssertEqual(
-            error(ImageSettings(frames: ImageFrames(atSeconds: [1], count: 2)), "image.frames"),
-            "Give at_seconds or count, not both."
-        )
-        XCTAssertEqual(
-            error(ImageSettings(frames: ImageFrames(atSeconds: [-1])), "image.frames.at_seconds"),
-            "at_seconds are seconds from the start: zero or more."
-        )
-        XCTAssertEqual(error(ImageSettings(frames: ImageFrames(count: 101)), "image.frames.count"), "count must be between 1 and 100.")
-        let many = image(
-            ImageSettings(formats: [.avif, .webp, .jpeg], frames: ImageFrames(count: 100)),
-            renditions: [Rendition(width: 640, height: 640)]
-        )
-        XCTAssertEqual(SpecTools.imageOutputCount(many), 300)
-        XCTAssertEqual(
-            SpecTools.validate(many)["output.image"],
-            "This makes 300 files (frames × renditions × formats); at most 200 are allowed."
-        )
-
-        // `image` belongs to mode image only.
-        XCTAssertEqual(
-            SpecTools.validate(OutputSpec(mode: .single, image: ImageSettings()))["output.image"],
-            "image applies only to mode \"image\"."
-        )
-        // Video renditions keep their rules.
-        XCTAssertEqual(
-            SpecTools.validate(OutputSpec(mode: .single, renditions: [Rendition(width: 641, height: 360)]))["output.renditions.0.width"],
-            "Width and height must be even (4:2:0 chroma)."
-        )
-    }
-
-    func testDiffAndDescribe() throws {
-        let preset = image(ImageSettings(formats: [.jpeg], frames: ImageFrames(count: 12)), renditions: [Rendition(width: 480, height: 270)])
-        var edited = preset
-        edited.image = ImageSettings(formats: [.jpeg], frames: ImageFrames(atSeconds: [1.5, 10]))
-        // A nested key removed is cleared, at every level.
-        XCTAssertEqual(
-            SpecTools.diff(edited, base: preset).json,
-            ["image": ["formats": ["jpeg"], "frames": ["at_seconds": [1.5, 10], "count": nil]]]
-        )
-        // Leaving image mode clears the preset's image settings.
-        var video = preset
-        video.mode = .single
-        let patch = SpecTools.diff(video, base: preset).json.objectValue ?? [:]
-        XCTAssertEqual(patch["mode"], "single")
-        XCTAssertEqual(patch["image"], .null)
-        XCTAssertNil(SpecTools.normalize(video).image)
-
-        XCTAssertEqual(SpecTools.describe(preset), "Images · JPEG · 480x270 · 12 frames")
-        XCTAssertEqual(
-            SpecTools.describe(image(ImageSettings(formats: [.avif, .jpeg], quality: 70), renditions: [Rendition(width: 640, height: 640, label: "small")])),
-            "Images · AVIF / JPEG · small · quality 70"
-        )
-        XCTAssertEqual(Catalog.imageTier(width: 1280, height: 720), .upTo1mp)
-        XCTAssertEqual(Catalog.imageTier(width: 2560, height: 1440), .upTo4mp)
-        XCTAssertEqual(Catalog.imageTier(width: 3840, height: 2160), .over4mp)
     }
 }

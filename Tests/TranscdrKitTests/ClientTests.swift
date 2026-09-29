@@ -3,14 +3,14 @@ import XCTest
 
 final class ClientTests: XCTestCase {
     let job = """
-    {"object":"job","id":"job_1","status":"queued","input":{"type":"url","url":"https://x/y.mov"},"output":{},"priority":"normal",
+    {"object":"job","id":"job_1","status":"queued","input":{"type":"url","url":"https://x/y.mov"},"output":\(specJSON),"priority":"normal",
      "progress":{"percent":0,"stage":"waiting","renditions":[]},"outputs":[],"metadata":{"customer_id":"c1"},"attempts":0,
      "max_attempts":3,"created_at":"2026-09-27T05:18:43.011992Z"}
     """
 
     func testAuthorizesAndSendsIdempotentJobCreation() async throws {
         let t = MockTransport([MockTransport.json(201, job)])
-        let created = try await client(t).jobs.create(.init(input: .asset("ast_1"), preset: "hls-av1-abr", metadata: ["customer_id": "c1"]))
+        let created = try await client(t).jobs.create(.init(input: .asset("ast_1"), spec: .preset("hls-av1-abr", overrides: nil), metadata: ["customer_id": "c1"]))
         XCTAssertEqual(created.metadata["customer_id"], "c1", "metadata keys are never rewritten")
         let sent = try XCTUnwrap(t.sent.first)
         XCTAssertEqual(sent.method, "POST")
@@ -42,7 +42,7 @@ final class ClientTests: XCTestCase {
         let body = #"{"error":{"type":"invalid_request_error","code":"validation_failed","message":"Width must be even.","param":"output.renditions.0.width","details":{"output.renditions.0.width":["Width must be even."]},"request_id":"req_9"}}"#
         let t = MockTransport([MockTransport.json(422, body)])
         do {
-            _ = try await client(t).presets.create(.init(name: "x"))
+            _ = try await client(t).presets.update("pre_1", .init(name: "x"))
             XCTFail("expected an error")
         } catch let e as TranscdrError {
             XCTAssertEqual(e.kind, .invalidRequest)
@@ -56,7 +56,7 @@ final class ClientTests: XCTestCase {
     func testQuotaErrorIsTyped() async throws {
         let t = MockTransport([MockTransport.json(402, #"{"error":{"type":"quota_error","code":"insufficient_credit","message":"Add credit."}}"#)])
         do {
-            _ = try await client(t).jobs.create(.init(input: .url("https://x/y.mov")))
+            _ = try await client(t).jobs.create(.init(input: .url("https://x/y.mov"), spec: .preset("web-av1-1080p", overrides: [:])))
             XCTFail("expected an error")
         } catch let e as TranscdrError {
             XCTAssertEqual(e.kind, .quota)
@@ -106,13 +106,8 @@ final class ClientTests: XCTestCase {
     }
 
     func testExplicitNullsClearValues() throws {
-        var spec = OutputSpec(codec: .av1)
-        spec.clear = [.ladder, .trim]
-        let json = try JSONValue.from(spec)
-        XCTAssertEqual(json["codec"], "av1")
-        XCTAssertEqual(json["ladder"], .null)
-        XCTAssertEqual(json["trim"], .null)
-        XCTAssertNil(json["gop"], "unset fields are left out")
+        let overrides = try JSONValue.from(PresetParams(output: ["video": ["crf": 20, "quality": nil]]))
+        XCTAssertEqual(overrides["output"], ["video": ["crf": 20, "quality": nil]], "an override's nulls remove fields")
 
         let settings = try JSONValue.from(BillingSettingsParams(monthlyLimitCents: .some(nil)))
         XCTAssertEqual(settings["monthly_limit_cents"], .null)

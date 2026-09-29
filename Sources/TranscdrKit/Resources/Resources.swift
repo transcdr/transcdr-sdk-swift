@@ -3,6 +3,12 @@ import Foundation
 import FoundationNetworking
 #endif
 
+/// Throw the API's 422 for a spec that lacks fields, without sending it.
+func checkComplete(_ output: OutputSpec) throws {
+    let errors = output.missingFields
+    if !errors.isEmpty { throw TranscdrError.invalidOutput(errors) }
+}
+
 /// URL-encode one path segment.
 func seg(_ value: String) -> String {
     var allowed = CharacterSet.urlPathAllowed
@@ -273,9 +279,12 @@ public struct JobListParams: Sendable {
 public struct JobsResource: Sendable {
     let client: Transcdr
 
-    /// Create a job. Safe to retry: it carries an idempotency key.
+    /// Create a job. Safe to retry: it carries an idempotency key. A whole spec
+    /// (`.output`) is checked against the API's required-field table first, and an incomplete
+    /// one throws `TranscdrError.invalidOutput` without a request.
     public func create(_ params: JobCreateParams, idempotencyKey: String = newIdempotencyKey()) async throws -> Job {
-        try await client.request("POST", "/v1/jobs", body: params, idempotencyKey: idempotencyKey)
+        if case .output(let output) = params.spec { try checkComplete(output) }
+        return try await client.request("POST", "/v1/jobs", body: params, idempotencyKey: idempotencyKey)
     }
 
     public func list(_ params: JobListParams = .init()) async throws -> ListResponse<Job> {
@@ -382,16 +391,35 @@ public struct PresetsResource: Sendable {
         ]
     }
 
-    public func create(_ params: PresetParams, idempotencyKey: String = newIdempotencyKey()) async throws -> Preset {
-        try await client.request("POST", "/v1/presets", body: params, idempotencyKey: idempotencyKey)
+    /// Create a preset: its spec is checked against the API's required-field table first.
+    public func create(_ params: PresetCreateParams, idempotencyKey: String = newIdempotencyKey()) async throws -> Preset {
+        try checkComplete(params.output)
+        return try await client.request("POST", "/v1/presets", body: params, idempotencyKey: idempotencyKey)
     }
 
+    /// A preset by id or slug, its latest version.
     public func retrieve(_ idOrSlug: String) async throws -> Preset {
         try await client.request("GET", "/v1/presets/\(seg(idOrSlug))")
     }
 
-    /// Change what is set (`PATCH`): `output` merges into the stored spec, and
-    /// `params.clear` empties `description` or `metadata`.
+    /// A preset as it was at version `version` (`GET /v1/presets/{id}@N`).
+    public func retrieve(_ idOrSlug: String, version: Int) async throws -> Preset {
+        try await client.request("GET", "/v1/presets/\(seg(idOrSlug))@\(version)")
+    }
+
+    /// Every version of a preset, oldest first: each a complete spec that never changes.
+    public func versions(_ idOrSlug: String) async throws -> [PresetVersion] {
+        try await client.collection("/v1/presets/\(seg(idOrSlug))/versions", as: PresetVersion.self).data
+    }
+
+    /// One version of a preset.
+    public func version(_ idOrSlug: String, _ version: Int) async throws -> PresetVersion {
+        let preset = try await retrieve(idOrSlug, version: version)
+        return PresetVersion(version: preset.version, output: preset.output, createdAt: nil)
+    }
+
+    /// Change what is set (`PATCH`): `output` merges over the latest version (a changed spec
+    /// is a new version), and `params.clear` empties `description` or `metadata`.
     public func update(_ id: String, _ params: PresetParams) async throws -> Preset {
         try await client.request("PATCH", "/v1/presets/\(seg(id))", body: params)
     }
@@ -399,7 +427,8 @@ public struct PresetsResource: Sendable {
     /// Replace the preset (`PUT`): `output` is the whole spec, and `description`
     /// and `metadata` left out are emptied.
     public func replace(_ id: String, _ params: PresetReplaceParams) async throws -> Preset {
-        try await client.request("PUT", "/v1/presets/\(seg(id))", body: params)
+        try checkComplete(params.output)
+        return try await client.request("PUT", "/v1/presets/\(seg(id))", body: params)
     }
 
     public func delete(_ id: String) async throws {

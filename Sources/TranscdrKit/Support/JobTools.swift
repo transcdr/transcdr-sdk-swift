@@ -35,26 +35,34 @@ public struct MinutesByTier: Hashable, Sendable {
 public enum JobEstimate {
     /// The automatic ladder's standard short sides.
     static let ladderShortSides = [2160, 1440, 1080, 720, 480, 360, 240]
-    static let defaultLadderCap = 1080
 
-    /// The short sides a spec produces from a source of `width`×`height`.
+    /// The short sides a spec produces from a source of `width`×`height`; audio output is
+    /// billed at the SD rate, as one.
     public static func plannedShortSides(_ spec: OutputSpec, sourceWidth: Int, sourceHeight: Int) -> [Int] {
         let sourceShort = max(1, min(sourceWidth, sourceHeight))
-        if let renditions = spec.renditions, !renditions.isEmpty {
-            return renditions.map(SpecTools.shortSide)
-        }
-        if let ladder = spec.ladder {
-            let top = min(ladder.maxShortSide ?? defaultLadderCap, sourceShort)
+        switch spec.renditions {
+        case .sizes(let sizes)?:
+            return sizes.map(\.shortSide)
+        case .ladder(let ladder)?:
+            let top = min(ladder.maxShortSide, sourceShort)
             return [top] + ladderShortSides.filter { Double($0) < Double(top) * 0.85 }
+        case .sourceSize?:
+            return [sourceShort]
+        case nil:
+            return [min(sourceShort, 480)]
         }
-        return [sourceShort]
     }
 
     /// Seconds of output from `duration` seconds of input (after trimming).
     public static func outputSeconds(_ spec: OutputSpec, duration: Double) -> Double {
         let d = duration.isFinite ? max(0, duration) : 0
-        guard let trim = spec.trim else { return d }
-        return max(0, min(trim.end ?? d, d) - max(0, trim.start ?? 0))
+        guard case .video(let video) = spec else { return d }
+        let end: Double
+        switch video.trim.end {
+        case .seconds(let s): end = min(s, d)
+        case .source: end = d
+        }
+        return max(0, end - max(0, video.trim.start))
     }
 
     /// Billable minutes for `spec` over a probed input. At least one second is billed.
@@ -89,12 +97,11 @@ public enum RequestSnippet {
         return lines.joined(separator: " \\\n")
     }
 
-    /// The `POST /v1/jobs` body that recreates `job`: its input, preset and
-    /// resolved output, priority, metadata and webhook URL.
+    /// The `POST /v1/jobs` body that recreates `job`: its input and resolved
+    /// output (complete, so no preset), priority, metadata and webhook URL.
     public static func createBody(for job: Job) -> JSONValue {
         var body: [String: JSONValue] = [:]
         body["input"] = (try? JSONValue.from(job.input)) ?? .null
-        if let preset = job.presetId { body["preset"] = .string(preset) }
         body["output"] = (try? JSONValue.from(job.output)) ?? .object([:])
         if job.priority != .normal { body["priority"] = .string(job.priority.rawValue) }
         if !job.metadata.isEmpty { body["metadata"] = .object(job.metadata.mapValues { .string($0) }) }

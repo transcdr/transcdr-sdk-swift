@@ -1818,38 +1818,15 @@ public enum AutomationHelpers {
         return out
     }
 
-    /// An automation's stored overrides on top of its preset's spec (the defaults
-    /// without one), resolved for the editor. Objects are replaced, not merged, as
-    /// the web dashboard does.
-    public static func editableSpec(override: OutputSpec, preset: OutputSpec?) -> OutputSpec {
-        var out = SpecTools.resolved(preset)
-        if let v = override.mode { out.mode = v }
-        if let v = override.codec { out.codec = v }
-        if let v = override.renditions { out.renditions = v }
-        if let v = override.ladder { out.ladder = v }
-        if let v = override.quality { out.quality = v }
-        if let v = override.gop { out.gop = v }
-        if let v = override.segmentSeconds { out.segmentSeconds = v }
-        if let v = override.audio { out.audio = v }
-        if let v = override.subtitles { out.subtitles = v }
-        if let v = override.color { out.color = v }
-        if let v = override.bitDepth { out.bitDepth = v }
-        if let v = override.maxFps { out.maxFps = v }
-        if let v = override.filters { out.filters = v }
-        if let v = override.trim { out.trim = v }
-        for field in override.clear {
-            switch field {
-            case .ladder: out.ladder = nil
-            case .gop: out.gop = nil
-            case .segmentSeconds: out.segmentSeconds = nil
-            case .subtitles: out.subtitles = nil
-            case .maxFps: out.maxFps = nil
-            case .filters: out.filters = nil
-            case .trim: out.trim = nil
-            default: break
-            }
+    /// An automation's stored overrides over its preset's spec, merged with the API's rules
+    /// for the editor; without a preset, the overrides are the whole spec. Nil when the result
+    /// is incomplete. (`Automation.resolvedOutput` is the server's own resolution.)
+    public static func editableSpec(override: OutputOverrides, preset: OutputSpec?) -> OutputSpec? {
+        guard let preset else {
+            guard OutputRules.check(override.json).isEmpty else { return nil }
+            return try? override.json.decode(as: OutputSpec.self)
         }
-        return SpecTools.resolved(out)
+        return SpecTools.merge(override, over: preset)
     }
 
     /// Connections an automation depends on that are turned off: it is paused until they are back on.
@@ -1917,7 +1894,7 @@ public struct AutomationDraft: Hashable, Sendable {
     public var queueId = ""
     public var pollMinutes = 5
     public var settleSeconds = 60
-    /// A preset id or system slug; "" for none (the defaults).
+    /// A preset id, system slug or `slug@N`; "" for none (the spec is then given whole).
     public var preset = AutomationHelpers.defaultPreset
     /// "" keeps outputs in Transcdr.
     public var destinationId = ""
@@ -1958,7 +1935,8 @@ public struct AutomationDraft: Hashable, Sendable {
     }
 
     /// The create or update body. `spec` is the full edited spec; only what differs
-    /// from the preset's goes out. On update, emptied values are sent as clears.
+    /// from the preset's goes out (all of it without a preset). On update, emptied
+    /// values are sent as clears.
     public func params(spec: OutputSpec, presetSpec: OutputSpec?, isNew: Bool) -> AutomationParams {
         func trimmed(_ s: String) -> String { s.trimmingCharacters(in: .whitespacesAndNewlines) }
         let pattern = trimmed(self.pattern)
