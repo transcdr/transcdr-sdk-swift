@@ -635,7 +635,8 @@ public struct ImageFormatInfo: Codable, Hashable, Sendable, Identifiable {
     public var lossless: Bool
     /// Keeps transparency.
     public var alpha: Bool
-    /// The quality used when `ImageSettings.quality` is nil; lossy formats only.
+    /// The quality a v1 request without one was given; lossy formats only. A v2 spec states
+    /// its own (`ImageSettings.quality`).
     public var defaultQuality: Int?
 
     enum CodingKeys: String, CodingKey {
@@ -705,12 +706,15 @@ public struct Capabilities: Codable, Sendable {
     public var inputImageFormats: [String]
     public var limits: [String: JSONValue]
     public var systemPresets: [Preset]
+    /// The output spec (v2) as data: every field, when it is required, what it takes. Nil from
+    /// a server that predates it.
+    public var output: OutputCapabilities?
 
     /// `limits.image`; nil when the service does not list it.
     public var imageLimits: ImageLimits? { try? limits["image"]?.decode(as: ImageLimits.self) }
 
     enum CodingKeys: String, CodingKey {
-        case codecs, modes, audio, color, filters, limits
+        case codecs, modes, audio, color, filters, limits, output
         case imageFormats = "image_formats"
         case inputImageFormats = "input_image_formats"
         case bitDepth = "bit_depth"
@@ -737,6 +741,117 @@ public struct Capabilities: Codable, Sendable {
         inputImageFormats = (try? c.decodeList([String].self, forKey: .inputImageFormats)) ?? []
         limits = (try? c.decodeMap([String: JSONValue].self, forKey: .limits)) ?? [:]
         systemPresets = (try? c.decodeList([Preset].self, forKey: .systemPresets)) ?? []
+        output = try? c.decodeIfPresent(OutputCapabilities.self, forKey: .output)
+    }
+}
+
+/// `capabilities.output`: the v2 output spec described as data, for checking a spec's
+/// completeness generically. `OutputRules` holds a copy of the same table.
+public struct OutputCapabilities: Codable, Hashable, Sendable {
+    /// 2.
+    public var version: Int
+    public var kinds: [OutputKind]
+    public var fields: [OutputField]
+    public var groups: [OutputGroup]
+    /// How to read `when`.
+    public var conditions: String?
+    public var containers: [ContainerInfo]
+    public var audioCodecs: [AudioCodecInfo]
+    /// What each value that follows the source resolves to, keyed `path: value`.
+    public var followValues: [String: String]
+    public var compatibility: OutputCompatibility?
+
+    enum CodingKeys: String, CodingKey {
+        case version, kinds, fields, groups, conditions, containers, compatibility
+        case audioCodecs = "audio_codecs"
+        case followValues = "follow_values"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        version = try c.decodeIfPresent(Int.self, forKey: .version) ?? 2
+        kinds = try c.decodeList([OutputKind].self, forKey: .kinds)
+        fields = try c.decodeList([OutputField].self, forKey: .fields)
+        groups = try c.decodeList([OutputGroup].self, forKey: .groups)
+        conditions = try c.decodeIfPresent(String.self, forKey: .conditions)
+        containers = try c.decodeList([ContainerInfo].self, forKey: .containers)
+        audioCodecs = try c.decodeList([AudioCodecInfo].self, forKey: .audioCodecs)
+        followValues = try c.decodeMap([String: String].self, forKey: .followValues)
+        compatibility = try c.decodeIfPresent(OutputCompatibility.self, forKey: .compatibility)
+    }
+
+    /// One field: needed (or, when `required` is false, allowed) when any object in `when`
+    /// matches; an object matches when every path in it has one of the listed values (`"*"`:
+    /// present, `"!"`: absent). Outside `when` it is refused.
+    public struct OutputField: Codable, Hashable, Sendable {
+        /// Relative to `output`; `[]` stands for each entry of a list.
+        public var path: String
+        public var required: Bool
+        public var when: [[String: [String]]]
+        /// The value's shape: `{"type": "enum", "values": [...]}`, `{"type": "number", "min": …}`, …
+        public var shape: JSONValue
+        /// Its exclusive group, if it is one of several choices.
+        public var group: String?
+        public var description: String?
+    }
+
+    /// Choices of which exactly one is given whenever `when` holds.
+    public struct OutputGroup: Codable, Hashable, Sendable {
+        public var name: String
+        public var members: [String]
+        public var when: [[String: [String]]]
+        public var exactlyOne: Bool
+
+        enum CodingKeys: String, CodingKey {
+            case name, members, when
+            case exactlyOne = "exactly_one"
+        }
+    }
+
+    /// A container format, its kind and the audio codecs it holds.
+    public struct ContainerInfo: Codable, Hashable, Sendable, Identifiable {
+        public var id: ContainerFormat
+        public var kind: OutputKind
+        public var audioCodecs: [AudioCodec]
+
+        enum CodingKeys: String, CodingKey {
+            case id, kind
+            case audioCodecs = "audio_codecs"
+        }
+    }
+
+    public struct AudioCodecInfo: Codable, Hashable, Sendable, Identifiable {
+        public var id: AudioCodec
+        public var name: String
+        public var lossless: Bool
+        public var maxChannels: Int
+        /// The fixed rates, for a codec that has them (MP3).
+        public var bitrates: [String]?
+
+        enum CodingKeys: String, CodingKey {
+            case id, name, lossless, bitrates
+            case maxChannels = "max_channels"
+        }
+    }
+
+    /// How clients still on the v1 shape are served.
+    public struct OutputCompatibility: Codable, Hashable, Sendable {
+        public var v1Requests: String?
+        public var v1Responses: V1Responses?
+
+        /// The header (`Transcdr-Output-Spec: v1`) or query (`output_spec=v1`, GET) that asks for
+        /// v1 responses, and when that mode goes.
+        public struct V1Responses: Codable, Hashable, Sendable {
+            public var header: String
+            public var value: String
+            public var query: String?
+            public var sunset: String?
+        }
+
+        enum CodingKeys: String, CodingKey {
+            case v1Requests = "v1_requests"
+            case v1Responses = "v1_responses"
+        }
     }
 }
 
@@ -839,78 +954,29 @@ public struct Stats: Codable, Hashable, Sendable {
 
 // MARK: - Operator console
 
-public struct AdminPoolStatus: Codable, Hashable, Sendable {
-    public var driver: String
-    public var pool: String
-    public var nodesTotal: Int
-    public var nodesReady: Int
-    public var gpusAllocatable: Int
-    public var pendingPods: Int
-
-    enum CodingKeys: String, CodingKey {
-        case driver, pool
-        case nodesTotal = "nodes_total"
-        case nodesReady = "nodes_ready"
-        case gpusAllocatable = "gpus_allocatable"
-        case pendingPods = "pending_pods"
-    }
-}
-
 public struct AdminOverview: Codable, Hashable, Sendable {
     public var organizations: Int
     public var jobsByStatus: [String: Int]
-    public var gpuPool: AdminPoolStatus?
 
     enum CodingKeys: String, CodingKey {
         case organizations
         case jobsByStatus = "jobs_by_status"
-        case gpuPool = "gpu_pool"
     }
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         organizations = try c.decodeIfPresent(Int.self, forKey: .organizations) ?? 0
         jobsByStatus = try c.decodeMap([String: Int].self, forKey: .jobsByStatus)
-        gpuPool = try? c.decodeIfPresent(AdminPoolStatus.self, forKey: .gpuPool)
     }
 }
 
-public struct AdminJobInternals: Codable, Hashable, Sendable {
-    public var node: String?
-    public var pod: String?
-    public var gpus: [String]
-    public var encoder: String?
-    public var dispatchRef: String?
-    public var heartbeatAt: Date?
-    public var rawError: JobError?
-
-    enum CodingKeys: String, CodingKey {
-        case node, pod, gpus, encoder
-        case dispatchRef = "dispatch_ref"
-        case heartbeatAt = "heartbeat_at"
-        case rawError = "raw_error"
-    }
-
-    public init(from decoder: Decoder) throws {
-        let c = try decoder.container(keyedBy: CodingKeys.self)
-        node = try c.decodeIfPresent(String.self, forKey: .node)
-        pod = try c.decodeIfPresent(String.self, forKey: .pod)
-        gpus = try c.decodeList([String].self, forKey: .gpus)
-        encoder = try c.decodeIfPresent(String.self, forKey: .encoder)
-        dispatchRef = try c.decodeIfPresent(String.self, forKey: .dispatchRef)
-        heartbeatAt = try c.decodeIfPresent(Date.self, forKey: .heartbeatAt)
-        rawError = try c.decodeIfPresent(JobError.self, forKey: .rawError)
-    }
-}
-
-/// A job as the operator console sees it: with its organization and internals.
+/// A job as the operator console sees it: with its organization.
 public struct AdminJob: Decodable, Hashable, Sendable, Identifiable {
     public var job: Job
     public var organization: String
-    public var internals: AdminJobInternals?
     public var id: String { job.id }
 
-    enum CodingKeys: String, CodingKey { case organization, internals }
+    enum CodingKeys: String, CodingKey { case organization }
 
     public init(from decoder: Decoder) throws {
         job = try Job(from: decoder)
@@ -920,7 +986,6 @@ public struct AdminJob: Decodable, Hashable, Sendable, Identifiable {
         } else {
             organization = (try? c.decode(Int.self, forKey: .organization)).map(String.init) ?? ""
         }
-        internals = try? c.decodeIfPresent(AdminJobInternals.self, forKey: .internals)
     }
 }
 

@@ -6,8 +6,19 @@ final class JobToolsTests: XCTestCase {
         try TranscdrCoding.decoder.decode(MediaInfo.self, from: Data(#"{"width":\#(w),"height":\#(h),"duration":\#(duration)}"#.utf8))
     }
 
+    func video(_ renditions: Renditions, trim: Trim = .whole) -> OutputSpec {
+        guard case .video(var v) = OutputSpecTests.mp4 else { fatalError() }
+        v.renditions = renditions
+        v.trim = trim
+        return .video(v)
+    }
+
+    func size(_ w: Int, _ h: Int) -> RenditionSize {
+        RenditionSize(label: .bySize, width: w, height: h, fit: .contain, orientation: .auto, upscale: false, cbrBitrate: nil)
+    }
+
     func testMinutesArePerRenditionByTier() throws {
-        let spec = OutputSpec(renditions: [Rendition(width: 1920, height: 1080), Rendition(width: 1280, height: 720), Rendition(width: 640, height: 360)])
+        let spec = video(.sizes([size(1920, 1080), size(1280, 720), size(640, 360)]))
         let m = JobEstimate.minutes(spec, info: try info(1920, 1080, duration: 600))
         XCTAssertEqual(m.hd, 20)
         XCTAssertEqual(m.sd, 10)
@@ -17,17 +28,18 @@ final class JobToolsTests: XCTestCase {
     }
 
     func testLadderFollowsTheSourceAndCap() {
-        let ladder = OutputSpec(ladder: Ladder(maxShortSide: nil))
+        let ladder = video(.ladder(Ladder(maxShortSide: 1080, fit: .contain, upscale: false)))
         XCTAssertEqual(JobEstimate.plannedShortSides(ladder, sourceWidth: 3840, sourceHeight: 2160), [1080, 720, 480, 360, 240])
         XCTAssertEqual(JobEstimate.plannedShortSides(ladder, sourceWidth: 1280, sourceHeight: 720), [720, 480, 360, 240])
-        XCTAssertEqual(JobEstimate.plannedShortSides(OutputSpec(), sourceWidth: 1080, sourceHeight: 1920), [1080])
+        let source = video(.sourceSize(SourceSize(label: .bySize, fit: .contain, upscale: false)))
+        XCTAssertEqual(JobEstimate.plannedShortSides(source, sourceWidth: 1080, sourceHeight: 1920), [1080])
     }
 
     func testTrimShortensTheOutputAndASecondIsBilled() throws {
-        let spec = OutputSpec(trim: Trim(start: 10, end: 70))
+        let spec = video(.sizes([size(1920, 1080)]), trim: Trim(start: 10, end: .seconds(70)))
         XCTAssertEqual(JobEstimate.outputSeconds(spec, duration: 600), 60)
-        XCTAssertEqual(JobEstimate.outputSeconds(OutputSpec(trim: Trim(start: 30)), duration: 20), 0)
-        XCTAssertGreaterThan(JobEstimate.minutes(OutputSpec(), info: try info(1280, 720, duration: 0)).total, 0)
+        XCTAssertEqual(JobEstimate.outputSeconds(video(.sizes([size(1920, 1080)]), trim: Trim(start: 30, end: .source)), duration: 20), 0)
+        XCTAssertGreaterThan(JobEstimate.minutes(OutputSpecTests.mp4, info: try info(1280, 720, duration: 0)).total, 0)
     }
 
     func testCurlQuotesTheBody() {

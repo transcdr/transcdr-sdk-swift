@@ -24,7 +24,7 @@ final class FixtureDecodingTests: XCTestCase {
         XCTAssertEqual(job.status, .completed)
         XCTAssertFalse(job.outputs.isEmpty)
         XCTAssertNotNil(job.completedAt)
-        XCTAssertNotNil(job.output.codec)
+        XCTAssertEqual(job.output.kind, .video)
         XCTAssertNotNil(job.billing)
         let events = try decodeFixture("job_events", as: ListResponse<JobEvent>.self)
         XCTAssertFalse(events.data.isEmpty)
@@ -35,11 +35,12 @@ final class FixtureDecodingTests: XCTestCase {
         XCTAssertEqual(assets.data.count, 5)
         let presets = try decodeFixture("presets", as: ListResponse<Preset>.self)
         XCTAssertTrue(presets.data.contains { $0.system })
-        XCTAssertTrue(presets.data.allSatisfy { $0.output.codec != nil })
+        XCTAssertTrue(presets.data.allSatisfy { $0.output.missingFields.isEmpty })
         let caps = try decodeFixture("capabilities", as: Capabilities.self)
         XCTAssertEqual(caps.codecs.map(\.id), ["av1", "h264", "h265"])
         XCTAssertEqual(caps.modes.map(\.id), ["single", "hls"])
         XCTAssertFalse(caps.systemPresets.isEmpty)
+        XCTAssertEqual(caps.output?.kinds, [.video, .audio, .image])
     }
 
     func testBilling() throws {

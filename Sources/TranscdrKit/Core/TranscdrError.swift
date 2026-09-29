@@ -34,13 +34,16 @@ public struct TranscdrError: Error, LocalizedError, Sendable, Equatable {
     public let param: String?
     /// Per-field validation messages, keyed by dotted param.
     public let details: [String: [String]]
+    /// An output spec refused: every failure, in order (missing fields first). `param` and
+    /// `message` are the first. Empty for other errors.
+    public let errors: [FieldError]
     public let requestId: String?
     /// Seconds to wait, from `Retry-After`, on 429.
     public let retryAfter: Double?
 
     public init(
         kind: Kind, status: Int = 0, message: String, code: String? = nil, param: String? = nil,
-        details: [String: [String]] = [:], requestId: String? = nil, retryAfter: Double? = nil
+        details: [String: [String]] = [:], errors: [FieldError] = [], requestId: String? = nil, retryAfter: Double? = nil
     ) {
         self.kind = kind
         self.status = status
@@ -48,18 +51,30 @@ public struct TranscdrError: Error, LocalizedError, Sendable, Equatable {
         self.code = code
         self.param = param
         self.details = details
+        self.errors = errors
         self.requestId = requestId
         self.retryAfter = retryAfter
     }
 
     public var errorDescription: String? { message }
 
-    /// Field errors of a 422, keyed by dotted param, including `param` itself.
+    /// Field errors of a 422, keyed by dotted param, including `param` itself: the first
+    /// message for each.
     public var fieldErrors: [String: String] {
         var out: [String: String] = [:]
-        for (key, messages) in details { if let first = messages.first { out[key] = first } }
+        for e in errors where out[e.param] == nil { out[e.param] = e.message }
+        for (key, messages) in details { if let first = messages.first, out[key] == nil { out[key] = first } }
         if let param, out[param] == nil { out[param] = message }
         return out
+    }
+
+    /// The error for an output spec refused before it was sent, shaped as the API's 422
+    /// (`validation_failed`), with no status since no request was made.
+    public static func invalidOutput(_ errors: [FieldError]) -> TranscdrError {
+        TranscdrError(
+            kind: .invalidRequest, message: errors.first?.message ?? "The output spec is incomplete.",
+            code: "validation_failed", param: errors.first?.param, errors: errors
+        )
     }
 
     /// Build the error for a failed response.
@@ -71,6 +86,7 @@ public struct TranscdrError: Error, LocalizedError, Sendable, Equatable {
                 let message: String?
                 let param: String?
                 let details: [String: [String]]?
+                let errors: [FieldError]?
                 let request_id: String?
             }
             let error: Body?
@@ -87,6 +103,7 @@ public struct TranscdrError: Error, LocalizedError, Sendable, Equatable {
             code: e?.code,
             param: e?.param,
             details: e?.details ?? [:],
+            errors: e?.errors ?? [],
             requestId: e?.request_id ?? headers.first { $0.key.lowercased() == "x-request-id" }?.value,
             retryAfter: retry
         )

@@ -1,120 +1,85 @@
 import Foundation
 
-/// An `output` override as sent on job, preset and automation requests: the
-/// JSON the server merges over the preset (objects merge, arrays replace,
-/// `null` clears). Build one from a full spec, or diff two with `SpecTools.diff`.
-public struct OutputSpecInput: Encodable, Hashable, Sendable {
-    public var json: JSONValue
-
-    public init(json: JSONValue) { self.json = json }
-
-    /// Every set field of `spec`.
-    public init(_ spec: OutputSpec) {
-        json = (try? JSONValue.from(spec)) ?? .object([:])
-    }
-
-    public var isEmpty: Bool { json.objectValue?.isEmpty ?? true }
-
-    public func encode(to encoder: Encoder) throws { try json.encode(to: encoder) }
-}
-
-/// Output-spec helpers shared by every editor: defaults, normalising editor
-/// state, the minimal override against a preset, validation with the
-/// server's rules, and a one-line description.
+/// Output-spec helpers shared by every editor: the smallest override against a preset, an
+/// override merged over a preset, validation with the API's rules, and a one-line description.
+/// None of them fills in a value: a spec states every field it needs.
 public enum SpecTools {
-    /// The API's defaults.
-    public static let defaultSpec = OutputSpec(
-        mode: .single, codec: .av1, renditions: [], ladder: nil, quality: Quality(), gop: nil, segmentSeconds: nil,
-        audio: AudioSettings(mode: .auto), subtitles: nil, color: .sdr, bitDepth: .auto, maxFps: nil, filters: nil, trim: nil,
-        fit: .contain, upscale: false
-    )
+    // MARK: Overrides
 
-    /// A spec with every field resolved (the defaults where unset), for editing.
-    public static func resolved(_ spec: OutputSpec?) -> OutputSpec {
-        let d = defaultSpec
-        guard let spec else { return d }
-        var out = spec
-        out.mode = spec.mode ?? d.mode
-        out.codec = spec.codec ?? d.codec
-        out.renditions = spec.renditions ?? []
-        out.fit = spec.fit ?? d.fit
-        out.upscale = spec.upscale ?? d.upscale
-        out.quality = spec.quality ?? Quality()
-        var audio = spec.audio ?? AudioSettings()
-        audio.mode = audio.mode ?? .auto
-        out.audio = audio
-        out.color = spec.color ?? d.color
-        out.bitDepth = spec.bitDepth ?? d.bitDepth
-        out.clear = []
-        return out
+    /// The smallest override that turns `base` (a preset version's spec) into `spec`, as a JSON
+    /// merge patch: changed values, and `null` for what `spec` no longer has. Without a base,
+    /// the whole spec.
+    public static func diff(_ spec: OutputSpec, base: OutputSpec?) -> OutputOverrides {
+        let target = (try? JSONValue.from(spec)) ?? .object([:])
+        guard let base else { return OutputOverrides(json: target) }
+        let from = (try? JSONValue.from(base)) ?? .object([:])
+        return OutputOverrides(json: mergePatch(target, over: from) ?? .object([:]))
     }
 
-    private static func blank(_ s: String?) -> Bool { s?.trimmingCharacters(in: .whitespaces).isEmpty ?? true }
-    private static func trimmed(_ s: String?) -> String? { blank(s) ? nil : s!.trimmingCharacters(in: .whitespaces) }
-
-    /// Drop empty strings and editor artefacts so the spec is what the API expects.
-    public static func normalize(_ spec: OutputSpec) -> OutputSpec {
-        var out = resolved(spec)
-        out.renditions = (out.renditions ?? []).map { r in
-            Rendition(
-                width: r.width, height: r.height, bitrate: trimmed(r.bitrate), label: trimmed(r.label), fit: r.fit,
-                orientation: r.orientation, upscale: r.upscale
-            )
-        }
-        out.quality = Quality(
-            target: trimmed(out.quality?.target), crf: out.quality?.crf,
-            bitrate: trimmed(out.quality?.bitrate), bufferMs: out.quality?.bufferMs
-        )
-        var audio = out.audio ?? AudioSettings()
-        audio.mode = audio.mode ?? .auto
-        audio.bitrate = trimmed(audio.bitrate)
-        // The API reads "mp4" as "m4a" and always answers "m4a".
-        if audio.container?.rawValue == "mp4" { audio.container = .m4a }
-        out.audio = audio
-        if out.mode != .hls { out.segmentSeconds = nil }
-        if out.mode != .image { out.image = nil }
-        out.subtitles = trimmed(out.subtitles)
-        out.filters = trimmed(out.filters)
-        if let trim = out.trim {
-            let start = trim.start ?? 0
-            out.trim = (start == 0 && trim.end == nil) ? nil : Trim(start: start, end: trim.end)
-        }
-        return out
-    }
-
-    /// The smallest override that turns `base` (a preset's spec, or the
-    /// defaults) into `spec`.
-    public static func diff(_ spec: OutputSpec, base: OutputSpec? = nil) -> OutputSpecInput {
-        let target = (try? JSONValue.from(normalize(spec)).objectValue) ?? [:]
-        let from = (try? JSONValue.from(normalize(base ?? defaultSpec)).objectValue) ?? [:]
-        var out: [String: JSONValue] = [:]
-        for key in OutputSpec.Field.allCases.map(\.stringValue) {
-            let t = target[key] ?? .null
-            let f = from[key] ?? .null
-            guard t != f else { continue }
-            if key == "quality" || key == "audio" || key == "image" {
-                out[key] = mergePatch(t, over: f)
+    /// `new` as a patch over `old`; nil when they are equal.
+    private static func mergePatch(_ new: JSONValue, over old: JSONValue) -> JSONValue? {
+        guard new != old else { return nil }
+        guard let target = new.objectValue, let before = old.objectValue else { return new }
+        var patch: [String: JSONValue] = [:]
+        for (k, v) in target {
+            if let o = before[k] {
+                if let p = mergePatch(v, over: o) { patch[k] = p }
             } else {
-                out[key] = t
+                patch[k] = v
             }
         }
-        return OutputSpecInput(json: .object(out))
-    }
-
-    /// `new` as a patch over `old`: nested objects merge on the server, so a key removed
-    /// here must be cleared, at every level (`image.frames` switching from `count` to
-    /// `at_seconds` clears `count`).
-    private static func mergePatch(_ new: JSONValue, over old: JSONValue) -> JSONValue {
-        guard var patch = new.objectValue, let before = old.objectValue else { return new }
-        for (k, v) in before {
-            if let n = patch[k] {
-                if n.objectValue != nil, v.objectValue != nil { patch[k] = mergePatch(n, over: v) }
-            } else {
-                patch[k] = .null
-            }
-        }
+        for k in before.keys where target[k] == nil { patch[k] = .null }
         return .object(patch)
     }
+
+    /// The choices of each exclusive group, by the object that holds them: setting one clears
+    /// the others, as the API's merge does.
+    static let exclusive: [String: [[String]]] = [
+        "video": [["quality", "crf", "cbr"]],
+        "video.gop": [["frames", "seconds"]],
+        "renditions": [["sizes", "ladder", "source_size"]],
+        "subtitles": [["tracks", "languages"]],
+        "image.frames": [["count", "at_seconds"]],
+    ]
+
+    /// `overrides` merged over `base` with the API's rules: objects merge key by key, scalars
+    /// and arrays replace, one choice of an exclusive group clears the others, a privacy preset
+    /// replaces the privacy section, and `null` removes a field. The result as JSON, which may
+    /// be incomplete: check it with `OutputRules.check`.
+    public static func merge(_ overrides: OutputOverrides, over base: JSONValue) -> JSONValue {
+        merge(overrides.json, over: base, at: "")
+    }
+
+    /// `overrides` merged over `base`, as a spec; nil when the result is incomplete.
+    public static func merge(_ overrides: OutputOverrides, over base: OutputSpec) -> OutputSpec? {
+        let merged = merge(overrides, over: (try? JSONValue.from(base)) ?? .object([:]))
+        guard OutputRules.check(merged).isEmpty else { return nil }
+        return try? merged.decode(as: OutputSpec.self)
+    }
+
+    private static func merge(_ overlay: JSONValue, over base: JSONValue, at path: String) -> JSONValue {
+        guard let patch = overlay.objectValue else { return overlay }
+        if path == "privacy", let preset = patch["preset"], !preset.isNull {
+            return .object(patch.filter { !$0.value.isNull })
+        }
+        var out = base.objectValue ?? [:]
+        for (key, value) in patch where !value.isNull {
+            for group in exclusive[path] ?? [] where group.contains(key) {
+                for sibling in group where sibling != key { out[sibling] = nil }
+            }
+        }
+        for (key, value) in patch {
+            if value.isNull {
+                out[key] = nil
+            } else {
+                let child = path.isEmpty ? key : "\(path).\(key)"
+                out[key] = value.objectValue != nil ? merge(value, over: out[key] ?? .object([:]), at: child) : value
+            }
+        }
+        return .object(out)
+    }
+
+    // MARK: Rates
 
     /// `800k` → 800000, `3M` → 3000000; nil when unreadable.
     public static func parseBitrate(_ s: String) -> Int? {
@@ -140,16 +105,15 @@ public enum SpecTools {
         return s
     }
 
-    /// The rates a constant-bitrate rendition may ask for, bits per second.
+    /// The rates a constant-bitrate size may ask for, bits per second.
     public static let cbrRange = 100_000...200_000_000
 
-    /// The rate a `cbr` rendition without one of its own (nor `quality.bitrate`)
-    /// is coded at, bits per second, as the service computes it. H.264 up to
-    /// 30 fps by short side: 144 → 0.2M, 240 → 0.4M, 360 → 0.8M, 480 → 1.2M,
-    /// 720 → 3M, 1080 → 5M, 1440 → 9M, 2160 → 16M; linear between rows, by
-    /// area above 2160. Above 30 fps it grows by half the extra frame rate
-    /// (capped at 120 fps). H.265 is 0.65× and AV1 0.5×. `fps` nil means 30.
-    public static func defaultCbrRate(codec: VideoCodec, width: Int, height: Int, fps: Double? = nil) -> Int {
+    /// What `video.cbr.bitrate: "standard"` codes a size at, bits per second, as the service
+    /// computes it. H.264 up to 30 fps by short side: 144 → 0.2M, 240 → 0.4M, 360 → 0.8M,
+    /// 480 → 1.2M, 720 → 3M, 1080 → 5M, 1440 → 9M, 2160 → 16M; linear between rows, by area
+    /// above 2160. Above 30 fps it grows by half the extra frame rate (capped at 120 fps).
+    /// H.265 is 0.65× and AV1 0.5×. `fps` nil means 30 or less.
+    public static func standardCbrRate(codec: VideoCodec, width: Int, height: Int, fps: Double?) -> Int {
         let table: [(side: Double, bps: Double)] = [
             (144, 200_000), (240, 400_000), (360, 800_000), (480, 1_200_000),
             (720, 3_000_000), (1080, 5_000_000), (1440, 9_000_000), (2160, 16_000_000),
@@ -177,43 +141,11 @@ public enum SpecTools {
         32_000, 40_000, 48_000, 56_000, 64_000, 80_000, 96_000, 112_000, 128_000, 160_000, 192_000, 224_000, 256_000, 320_000,
     ]
 
-    /// Whether the spec's audio is MP3: `audio.mode` `mp3`, or `auto` in an audio-only `.mp3`.
-    public static func isMp3Output(_ spec: OutputSpec) -> Bool {
-        audioCodec(spec) == .mp3
-    }
-
-    /// The file audio-only output is: the container named, else a `.flac` for FLAC, an
-    /// `.m4a` for ALAC and an `.mp3` for the rest. Nil for output with video.
-    public static func audioContainer(_ spec: OutputSpec) -> AudioContainer? {
-        guard spec.mode == .audio else { return nil }
-        if let named = spec.audio?.container, named != .auto { return named.rawValue == "mp4" ? .m4a : named }
-        switch spec.audio?.mode ?? .auto {
-        case .flac: return .flac
-        case .alac: return .m4a
-        default: return .mp3
-        }
-    }
-
-    /// The codec the output's audio is made in, as its `AudioMode` (`opus`, `mp3`, `aac`,
-    /// `flac` or `alac`); nil when audio is dropped. `auto` is MP3 in an audio-only `.mp3`
-    /// and Opus everywhere else.
-    public static func audioCodec(_ spec: OutputSpec) -> AudioMode? {
-        let mode = spec.audio?.mode ?? .auto
-        if mode == .drop { return nil }
-        if mode == .auto { return audioContainer(spec) == .mp3 ? .mp3 : .opus }
-        return mode
-    }
-
-    /// A codec's name in messages: `AAC`, `Opus`, `MP3`, `FLAC`, `ALAC`.
-    fileprivate static func codecName(_ codec: AudioMode) -> String {
-        codec == .opus ? "Opus" : codec.rawValue.uppercased()
-    }
-
     /// AAC-LC's rates, bits per second per main channel (the LFE of 5.1 and 7.1 does not count).
     public static let aacBitratePerChannel = 8_000...288_000
 
-    /// An AAC bitrate's error for a channel layout, with the server's message; nil when
-    /// valid. The source's layout (or one this SDK does not know) takes at least 8k.
+    /// An AAC bitrate's error for a channel layout, with the API's message; nil when valid. The
+    /// source's layout takes at least 8k.
     public static func aacBitrateError(_ bps: Int, channels: AudioChannels) -> String? {
         let count: Int?
         switch channels {
@@ -231,337 +163,293 @@ public enum SpecTools {
         return "AAC takes 8k to 288k per channel: \(lo / 1000)k to \(min(hi / 1000, 512))k for \(channels.rawValue)."
     }
 
-    /// A constant-bitrate rate's error, with the server's messages; nil when valid.
+    /// A constant rate's error, with the API's messages; nil when valid.
     private static func cbrRateError(_ s: String) -> String? {
         guard let bps = parseBitrate(s) else { return "Bitrate must look like 800k, 3M or 2500000." }
         return cbrRange.contains(bps) ? nil : "A constant bitrate must be between 100k and 200M."
     }
 
-    public static func isQualityTarget(_ target: String) -> Bool {
-        if Quality.targets.contains(target) { return true }
-        guard target.hasPrefix("vmaf="), let n = Int(target.dropFirst(5)), target.count <= 8 else { return false }
+    /// A quality level: `visually_lossless`, `high`, `standard`, `low` or `vmaf=N` (1–100).
+    public static func isQualityLevel(_ level: String) -> Bool {
+        if VideoRate.qualityLevels.contains(level) { return true }
+        guard level.hasPrefix("vmaf="), let n = Int(level.dropFirst(5)), level.count <= 8 else { return false }
         return (1...100).contains(n)
     }
 
-    public static func shortSide(_ r: Rendition) -> Int { min(r.width, r.height) }
+    // MARK: Sizes and images
 
-    public static func effectiveLabel(_ r: Rendition) -> String {
-        if let label = r.label, !label.isEmpty { return label }
-        return "\(shortSide(r))p"
+    /// A video size's name before it is made: its label, else `<short side>p` of its box. (Its
+    /// file is named by the size it comes out at.)
+    public static func effectiveLabel(_ size: RenditionSize) -> String {
+        size.label == .bySize ? "\(size.shortSide)p" : size.label.rawValue
     }
 
-    /// An image rendition's name before it is made: its label, else its box, `1920x1080`.
-    /// (Its files are named by the size it comes out at.)
-    public static func effectiveImageLabel(_ r: Rendition) -> String {
-        if let label = r.label, !label.isEmpty { return label }
-        return "\(r.width)x\(r.height)"
+    /// An image size's name before it is made: its label, else its box, `1920x1080`.
+    public static func effectiveImageLabel(_ size: RenditionSize) -> String {
+        size.label == .bySize ? "\(size.width)x\(size.height)" : size.label.rawValue
     }
 
-    /// An image rendition's sides, in pixels; odd sizes are fine.
+    /// An image size's sides, in pixels; odd sizes are fine.
     public static let imageDimensions = 16...8192
-    /// The most files one image job may make: stills × renditions × formats.
+    /// The most files one image job may make: stills × sizes × formats.
     public static let maxImageOutputs = 200
     /// The most stills one video may give.
     public static let maxFrames = 100
 
-    /// The files an image spec makes: stills × renditions (none is one, at the source's
-    /// size) × formats.
-    public static func imageOutputCount(_ spec: OutputSpec) -> Int {
-        let image = spec.image ?? ImageSettings()
-        let frames = image.frames.map { $0.atSeconds?.count ?? $0.count ?? 1 } ?? 1
-        return frames * max(1, spec.renditions?.count ?? 0) * max(1, image.formats?.count ?? 1)
+    /// The files an image spec makes: stills × sizes (the source size is one) × formats.
+    public static func imageOutputCount(_ output: ImageOutput) -> Int {
+        let sizes: Int
+        if case .sizes(let s) = output.renditions { sizes = max(1, s.count) } else { sizes = 1 }
+        return output.image.frames.stillCount * sizes * max(1, output.image.formats.count)
     }
 
-    /// Errors keyed by the contract's dotted param (`output.renditions.0.width`),
-    /// with the server's rules.
-    public static func validate(_ input: OutputSpec, maxShortSide: Int = 4320) -> [String: String] {
-        let s = normalize(input)
-        var errors: [String: String] = [:]
-        func set(_ param: String, _ message: String) {
-            let key = "output.\(param)"
-            if errors[key] == nil { errors[key] = message }
-        }
-        if s.mode == .audio {
-            // Audio-only output writes no video.
-            let q = s.quality
-            let video: [(String, Bool)] = [
-                ("renditions", !(s.renditions ?? []).isEmpty),
-                ("ladder", s.ladder != nil),
-                ("quality", q?.target != nil || q?.crf != nil || q?.bitrate != nil || q?.bufferMs != nil),
-                ("gop", s.gop != nil),
-                ("codec", (s.codec ?? .av1) != .av1),
-                ("color", (s.color ?? .sdr) != .sdr),
-                ("bit_depth", (s.bitDepth ?? .auto) != .auto),
-                ("max_fps", s.maxFps != nil),
-                ("filters", s.filters != nil),
-                ("subtitles", s.subtitles != nil),
-            ]
-            for (field, present) in video where present {
-                set(field, "Audio-only output writes no video, so \(field) does not apply.")
-            }
-            if s.trim != nil { set("trim", "A trim is not available for audio-only output.") }
-        }
-        if s.mode == .image {
-            // Image output makes still images.
-            let q = s.quality
-            let video: [(String, Bool)] = [
-                ("ladder", s.ladder != nil),
-                ("quality", q?.target != nil || q?.crf != nil || q?.bitrate != nil || q?.bufferMs != nil),
-                ("gop", s.gop != nil),
-                ("codec", (s.codec ?? .av1) != .av1),
-                ("color", (s.color ?? .sdr) != .sdr),
-                ("bit_depth", (s.bitDepth ?? .auto) != .auto),
-                ("max_fps", s.maxFps != nil),
-                ("filters", s.filters != nil),
-                ("subtitles", s.subtitles != nil),
-                ("trim", s.trim != nil),
-                ("audio", (s.audio ?? AudioSettings(mode: .auto)) != AudioSettings(mode: .auto)),
-            ]
-            for (field, present) in video where present {
-                set(field, "Image output makes still images, so \(field) does not apply.")
-            }
-            validateImage(s, set)
-        } else if input.image != nil {
-            set("image", "image applies only to mode \"image\".")
-        }
-        let renditions = s.mode == .audio ? [] : (s.renditions ?? [])
-        if renditions.count > 8 { set("renditions", "At most 8 renditions are allowed.") }
-        for (i, r) in renditions.enumerated() where s.mode == .image {
-            let at = { (f: String) in "renditions.\(i).\(f)" }
-            for (field, side) in [("width", r.width), ("height", r.height)] where !imageDimensions.contains(side) {
-                set(at(field), "An image rendition's \(field) must be between 16 and 8192.")
-            }
-            if r.bitrate != nil { set(at("bitrate"), "An image rendition has no bitrate.") }
-            if let l = r.label, l.range(of: "^[A-Za-z0-9_-]{1,32}$", options: .regularExpression) == nil {
-                set(at("label"), "Labels are 1–32 characters of A–Z, a–z, 0–9, - and _.")
+    // MARK: Validation
+
+    /// Every error the API would give this spec, with its params and messages: first the
+    /// required-field table (`OutputRules.check`); once that passes, the values against each
+    /// other and the plan's limits (`maxShortSide`, `maxSizes`).
+    public static func validate(_ spec: OutputSpec, maxShortSide: Int, maxSizes: Int) -> [FieldError] {
+        let table = spec.missingFields
+        if !table.isEmpty { return table }
+        var errors: [FieldError] = []
+        func fail(_ path: String, _ message: String) { errors.append(FieldError(param: "output.\(path)", message: message)) }
+
+        if let container = spec.container {
+            let allowed = spec.kind == .video ? ContainerFormat.video : ContainerFormat.audio
+            if !allowed.contains(container.format) {
+                fail("container.format", spec.kind == .video
+                    ? "Video output is packaged as mp4 or hls."
+                    : "Audio output is packaged as mp3, flac or m4a.")
             }
         }
-        for (i, r) in renditions.enumerated() where s.mode != .image {
-            let at = { (f: String) in "renditions.\(i).\(f)" }
-            if r.width < 64 || r.width > 7680 { set(at("width"), "Width must be between 64 and 7680.") }
-            else if r.width % 2 != 0 { set(at("width"), "Width and height must be even (4:2:0 chroma).") }
-            if r.height < 64 || r.height > 4320 { set(at("height"), "Height must be between 64 and 4320.") }
-            else if r.height % 2 != 0 { set(at("height"), "Width and height must be even (4:2:0 chroma).") }
-            if shortSide(r) > maxShortSide { set(at("height"), "Your plan allows renditions up to \(maxShortSide)p.") }
-            if let b = r.bitrate {
-                if s.quality?.isCbr != true {
-                    set(at("bitrate"), "A rendition bitrate is a constant bit rate: set quality.target to \"cbr\", or remove the bitrate to code to a quality level.")
-                } else if let message = cbrRateError(b) {
-                    set(at("bitrate"), message)
-                }
+        let hls = spec.container?.format == .hls
+        if hls && spec.privacy.resolved.keepsAny {
+            fail("privacy", "HLS output carries no file metadata, so none can be kept: strip every category, or use container mp4.")
+        }
+        switch spec {
+        case .video(let v):
+            validateVideo(v.video, hls: hls, fail)
+            validateAudio(v.audio, kind: .video, format: v.container.format, fail)
+            validateRenditions(v.renditions, image: false, maxShortSide: maxShortSide, maxSizes: maxSizes, fail)
+            if case .seconds(let end) = v.trim.end, end <= v.trim.start {
+                fail("trim.end", "trim.end must be after trim.start.")
             }
-            if let l = r.label, l.range(of: "^[A-Za-z0-9_-]{1,32}$", options: .regularExpression) == nil {
-                set(at("label"), "Labels are 1–32 characters of A–Z, a–z, 0–9, - and _.")
-            }
-        }
-        let labels = renditions.map(s.mode == .image ? effectiveImageLabel : effectiveLabel)
-        if Set(labels).count != labels.count { set("renditions", "Two renditions share a label; give them distinct labels.") }
-        if let side = s.ladder?.maxShortSide, side < 64 || side > maxShortSide {
-            set("ladder.max_short_side", "max_short_side must be between 64 and \(maxShortSide).")
-        }
-        if let target = s.quality?.target, !isQualityTarget(target) {
-            set("quality.target", "Target must be visually_lossless, high, standard, low or vmaf=N (N between 1 and 100).")
-        }
-        if let q = s.quality, q.isCbr {
-            if q.crf != nil { set("quality.crf", "crf names a quality level and cbr a bit rate: use one or the other.") }
-            if let b = q.bitrate, let message = cbrRateError(b) { set("quality.bitrate", message) }
-            if let ms = q.bufferMs, !(100...10_000).contains(ms) { set("quality.buffer_ms", "buffer_ms must be between 100 and 10000.") }
-        } else if let q = s.quality, q.bitrate != nil || q.bufferMs != nil {
-            set(q.bitrate != nil ? "quality.bitrate" : "quality.buffer_ms", "A bitrate and buffer apply to constant bit rate: set quality.target to \"cbr\".")
-        }
-        if let crf = s.quality?.crf, crf < 0 || crf > 63 { set("quality.crf", "crf must be between 0 and 63.") }
-        if let gop = s.gop, gop < 1 || gop > 1200 { set("gop", "gop must be between 1 and 1200 frames.") }
-        if s.mode == .hls, let seg = s.segmentSeconds, seg < 1 || seg > 20 {
-            set("segment_seconds", "segment_seconds must be between 1 and 20.")
-        }
-        let audioMode = s.audio?.mode ?? .auto
-        let channels = s.audio?.channels
-        let codec = audioCodec(s)
-        if s.mode == .audio && audioMode == .drop {
-            set("audio.mode", "Audio-only output needs audio: set audio.mode to \"auto\" or a codec.")
-        }
-        if s.mode != .audio, let container = s.audio?.container, container != .auto {
-            set("audio.container", "container applies only to mode \"audio\": video output is an MP4 or an HLS package.")
-        }
-        if let file = audioContainer(s), let codec {
-            if file == .flac && codec != .flac {
-                set("audio.container", "A .flac file holds FLAC only: set audio.mode to \"flac\", or container to \"m4a\".")
-            } else if file == .mp3 && codec.isLossless {
-                set("audio.container", "An .mp3 file cannot hold lossless audio: set container to \"flac\" or \"m4a\".")
-            } else if file == .mp3 && codec != .mp3 {
-                set("audio.mode", "An .mp3 file cannot hold \(codecName(codec)): use \"auto\" or \"mp3\", or set container to \"m4a\".")
-            }
-        }
-        if s.mode == .hls && audioMode == .mp3 {
-            set("audio.mode", "MP3 is not available for HLS: use \"auto\", \"aac\" or \"opus\" there, or a single file or audio-only output for MP3.")
-        }
-        if codec == nil, let channels, channels != .source {
-            set("audio.channels", "Audio channels mean nothing when audio is dropped.")
-        }
-        if codec == nil, let policy = s.audio?.heAac, policy != .auto {
-            set("audio.he_aac", "he_aac means nothing when audio is dropped.")
-        }
-        if codec == .mp3, channels?.isSurround == true {
-            set("audio.channels", "MP3 carries two channels at most: choose source, mono or stereo (a surround source is downmixed to stereo).")
-        }
-        if s.audio?.stereoFallback == true {
-            if s.mode != .hls {
-                set("audio.stereo_fallback", "stereo_fallback applies only to mode \"hls\".")
-            } else if codec == nil {
-                set("audio.stereo_fallback", "stereo_fallback means nothing when audio is dropped.")
-            } else if channels == .mono || channels == .stereo {
-                set("audio.stereo_fallback", "stereo_fallback adds a stereo rendition beside surround audio, so channels must be source, 5.1 or 7.1.")
-            }
-        }
-        let lossless = codec?.isLossless == true
-        if let depth = s.audio?.bitDepth, depth != .source, !lossless {
-            set("audio.bit_depth", "bit_depth applies to FLAC and ALAC only.")
-        }
-        if let level = s.audio?.flacCompression, level != .default, codec != .flac {
-            set("audio.flac_compression", "flac_compression applies to FLAC only.")
-        }
-        if let bitrate = s.audio?.bitrate {
-            if lossless {
-                set("audio.bitrate", "FLAC and ALAC are lossless and take no bitrate: remove audio.bitrate.")
-            } else if let bps = parseBitrate(bitrate), (6000...512_000).contains(bps) {
-                if codec == nil { set("audio.bitrate", "An audio bitrate means nothing when audio is dropped.") }
-                else if codec == .mp3, !mp3Bitrates.contains(bps) {
-                    set("audio.bitrate", "MP3 is constant bitrate at 32k, 40k, 48k, 56k, 64k, 80k, 96k, 112k, 128k, 160k, 192k, 224k, 256k or 320k.")
-                } else if codec == .aac, let message = aacBitrateError(bps, channels: channels ?? .source) {
-                    set("audio.bitrate", message)
-                }
-            } else {
-                set("audio.bitrate", "Audio bitrate must be between 6k and 512k.")
-            }
-        }
-        if let subs = s.subtitles, subs != "all", subs != "none",
-           !subs.split(separator: ",").allSatisfy({ String($0).range(of: "^[a-z]{2,3}$", options: .regularExpression) != nil })
-        {
-            set("subtitles", "subtitles must be all, none, or ISO 639 codes such as eng,deu.")
-        }
-        if (s.color == .hdr10 || s.color == .hlg) && s.bitDepth == .eight {
-            set("bit_depth", "HDR output needs 10-bit; use bit_depth \"auto\" or \"10bit\".")
-        }
-        if s.codec == .h264 && s.bitDepth == .ten {
-            set("bit_depth", "10-bit H.264 is not offered; use av1 or h265 for 10-bit output.")
-        }
-        if let fps = s.maxFps, fps < 1 || fps > 240 { set("max_fps", "max_fps must be between 1 and 240.") }
-        if let f = s.filters, f.count > 512 || f.contains(where: \.isWhitespace) {
-            set("filters", "filters must be a filter chain such as crop=1280:720,hflip.")
-        }
-        if let trim = s.trim {
-            if (trim.start ?? 0) < 0 { set("trim.start", "trim.start must be zero or more seconds.") }
-            if let end = trim.end, end <= (trim.start ?? 0) { set("trim.end", "trim.end must be after trim.start.") }
+        case .audio(let a):
+            validateAudio(a.audio, kind: .audio, format: a.container.format, fail)
+        case .image(let i):
+            validateImage(i, fail)
+            validateRenditions(i.renditions, image: true, maxShortSide: maxShortSide, maxSizes: maxSizes, fail)
         }
         return errors
     }
 
-    /// The image settings' errors, with the server's messages.
-    private static func validateImage(_ s: OutputSpec, _ set: (String, String) -> Void) {
-        let image = s.image ?? ImageSettings()
-        let formats = image.formats ?? [.avif]
-        if formats.isEmpty || formats.count > ImageFormat.all.count {
-            set("image.formats", "Give one to four formats: avif, webp, jpeg, png.")
+    private static func validateVideo(_ video: VideoSettings, hls: Bool, _ fail: (String, String) -> Void) {
+        if (video.color == .hdr10 || video.color == .hlg) && video.bitDepth == .eight {
+            fail("video.bit_depth", "HDR output needs 10-bit: use bit_depth from_color or 10bit.")
         }
-        for (i, f) in formats.enumerated() where formats[..<i].contains(f) {
-            set("image.formats", "\(f.rawValue) is listed twice.")
+        if video.codec == .h264 && video.bitDepth == .ten {
+            fail("video.bit_depth", "10-bit H.264 is not offered; use av1 or h265 for 10-bit output.")
         }
-        let lossless = image.lossless == true
-        if lossless, let f = formats.first(where: { $0 != .webp && $0 != .png }) {
-            set("image.lossless", "lossless applies to webp (png is always lossless); \(f.rawValue) has no lossless form.")
+        if case .cbr(let cbr) = video.rate, cbr.bitrate != ConstantBitRate.standard, let m = cbrRateError(cbr.bitrate) {
+            fail("video.cbr.bitrate", m)
         }
-        if let quality = image.quality {
-            if !(1...100).contains(quality) {
-                set("image.quality", "quality must be between 1 and 100.")
-            } else if !formats.contains(where: { $0.isLossy && !(lossless && $0 == .webp) }) {
-                set("image.quality", "quality applies to lossy formats (avif, webp, jpeg), and none is being made.")
-            }
+        if video.gop == .segment && !hls {
+            fail("video.gop", "gop \"segment\" is for hls; give {\"seconds\": N} or {\"frames\": N}.")
         }
-        if let frames = image.frames {
-            switch (frames.atSeconds, frames.count) {
-            case (.some, .some):
-                set("image.frames", "Give at_seconds or count, not both.")
-            case (.some(let at), nil):
-                if at.isEmpty || at.count > maxFrames {
-                    set("image.frames.at_seconds", "at_seconds takes between 1 and \(maxFrames) times.")
-                } else if at.contains(where: { !$0.isFinite || $0 < 0 }) {
-                    set("image.frames.at_seconds", "at_seconds are seconds from the start: zero or more.")
-                }
-            case (nil, .some(let n)) where n < 1 || n > maxFrames:
-                set("image.frames.count", "count must be between 1 and \(maxFrames).")
-            default:
-                break
-            }
-        }
-        let outputs = imageOutputCount(s)
-        if outputs > maxImageOutputs {
-            set("image", "This makes \(outputs) files (frames × renditions × formats); at most \(maxImageOutputs) are allowed.")
+        if video.filters.joined(separator: ",").count > 512 {
+            fail("video.filters", "The filter chain is at most 512 characters.")
         }
     }
+
+    private static func validateAudio(_ track: AudioTrack, kind: OutputKind, format: ContainerFormat, _ fail: (String, String) -> Void) {
+        if kind == .audio && track == .drop {
+            fail("audio.handling", "Audio output needs audio: set audio.handling to auto or encode.")
+            return
+        }
+        guard let a = track.encoding else { return }
+        let codec = a.codec
+        if track.handling == .auto {
+            if format == .mp3 && codec != .mp3 {
+                fail("audio.codec", "With handling auto, audio an .mp3 file cannot carry becomes MP3: set codec mp3.")
+            } else if format != .mp3 && codec != .opus {
+                fail("audio.codec", "With handling auto, audio the container cannot carry becomes Opus: set codec opus, or handling encode to make every track this codec.")
+            }
+        }
+        if format == .flac && codec != .flac {
+            fail("audio.codec", "A .flac file holds FLAC only: set codec flac, or container m4a.")
+        } else if format == .mp3 && codec != .mp3 {
+            fail("audio.codec", "An .mp3 file holds MP3 only, not \(codec.displayName): set codec mp3, or container m4a.")
+        } else if format == .hls && codec == .mp3 {
+            fail("audio.codec", "MP3 is not available for HLS: use opus or aac there, or an mp4 or audio output for MP3.")
+        }
+        if codec == .mp3 && a.channels.isSurround {
+            fail("audio.channels", "MP3 carries two channels at most: choose source, mono or stereo (a surround source is downmixed to stereo).")
+        }
+        if a.stereoFallback == true && (a.channels == .mono || a.channels == .stereo) {
+            fail("audio.stereo_fallback", "stereo_fallback adds a stereo rendition beside surround audio, so channels must be source, 5.1 or 7.1.")
+        }
+        if let bitrate = a.bitrate, bitrate != AudioEncoding.standard {
+            guard let bps = parseBitrate(bitrate), (6000...512_000).contains(bps) else {
+                fail("audio.bitrate", "Audio bitrate must be between 6k and 512k.")
+                return
+            }
+            if codec == .mp3 && !mp3Bitrates.contains(bps) {
+                fail("audio.bitrate", "MP3 is constant bitrate at 32k, 40k, 48k, 56k, 64k, 80k, 96k, 112k, 128k, 160k, 192k, 224k, 256k or 320k.")
+            }
+            if codec == .aac, let m = aacBitrateError(bps, channels: a.channels) {
+                fail("audio.bitrate", m)
+            }
+        }
+    }
+
+    private static func validateImage(_ output: ImageOutput, _ fail: (String, String) -> Void) {
+        let image = output.image
+        for (i, f) in image.formats.enumerated() where image.formats[..<i].contains(f) {
+            fail("image.formats", "\(f.rawValue) is listed twice.")
+        }
+        if image.lossless == true, let f = image.formats.first(where: { $0 != .webp && $0 != .png }) {
+            fail("image.lossless", "lossless applies to webp (png is always lossless); \(f.rawValue) has no lossless form.")
+        }
+        if let quality = image.quality {
+            let lossy = image.lossyFormats
+            for f in lossy where quality[f] == nil {
+                fail("image.quality.\(f.rawValue)", "image.quality needs a quality for \(f.rawValue), which is made lossy.")
+            }
+            for f in quality.keys.sorted(by: { $0.rawValue < $1.rawValue }) where !lossy.contains(f) {
+                fail("image.quality.\(f.rawValue)", "\(f.rawValue) is not made lossy here, so it takes no quality.")
+            }
+        }
+        if case .atSeconds(let times) = image.frames, times.contains(where: { !$0.isFinite || $0 < 0 }) {
+            fail("image.frames.at_seconds", "at_seconds are seconds from the start: zero or more.")
+        }
+        let outputs = imageOutputCount(output)
+        if outputs > maxImageOutputs {
+            fail("image", "This makes \(outputs) files (frames × sizes × formats); at most \(maxImageOutputs) are allowed.")
+        }
+    }
+
+    private static func validateRenditions(
+        _ renditions: Renditions, image: Bool, maxShortSide: Int, maxSizes: Int, _ fail: (String, String) -> Void
+    ) {
+        if case .ladder(let ladder) = renditions, !(64...maxShortSide).contains(ladder.maxShortSide) {
+            fail("renditions.ladder.max_short_side", "max_short_side must be between 64 and \(maxShortSide).")
+        }
+        guard case .sizes(let sizes) = renditions else { return }
+        if sizes.count > maxSizes { fail("renditions.sizes", "At most \(maxSizes) sizes are allowed.") }
+        var labels: [String] = []
+        for (i, s) in sizes.enumerated() {
+            let at = { (field: String) in "renditions.sizes.\(i).\(field)" }
+            if image {
+                for (field, side) in [("width", s.width), ("height", s.height)] where !imageDimensions.contains(side) {
+                    fail(at(field), "An image size's \(field) must be between 16 and 8192.")
+                }
+                labels.append(effectiveImageLabel(s))
+                continue
+            }
+            if s.width < 64 || s.width > 7680 {
+                fail(at("width"), "Width must be between 64 and 7680.")
+            } else if s.height < 64 || s.height > 4320 {
+                fail(at("height"), "Height must be between 64 and 4320.")
+            } else if s.width % 2 != 0 || s.height % 2 != 0 {
+                fail(at("width"), "Width and height must be even (4:2:0 chroma).")
+            } else if s.shortSide > maxShortSide {
+                fail(at("height"), "Your plan allows renditions up to \(maxShortSide)p.")
+            }
+            if let rate = s.cbrBitrate, rate != ConstantBitRate.standard, let m = cbrRateError(rate) {
+                fail(at("video.cbr.bitrate"), m)
+            }
+            labels.append(effectiveLabel(s))
+        }
+        if Set(labels).count != labels.count {
+            fail("renditions.sizes", "Two sizes share a label; give them distinct labels.")
+        }
+    }
+
+    // MARK: Describing
 
     /// `HLS · AV1 · ladder ≤ 1080p · standard`, or under constant bit rate
     /// `HLS · H.264 · 1080p / 720p · CBR 5 / 3 Mb/s`, or for images
-    /// `Images · AVIF / JPEG · 1920x1920 / small · 12 frames`.
+    /// `Images · AVIF / JPEG · 1920x1920 / small · 12 frames`, or `MP3 audio · 128k`.
     public static func describe(_ spec: OutputSpec?) -> String {
         guard let spec else { return "—" }
-        if spec.mode == .image {
-            let image = spec.image ?? ImageSettings()
-            var parts = ["Images", (image.formats ?? [.avif]).map { $0.rawValue.uppercased() }.joined(separator: " / ")]
-            if let r = spec.renditions, !r.isEmpty {
-                parts.append(r.map(effectiveImageLabel).joined(separator: " / "))
-            } else {
-                parts.append("source size")
+        switch spec {
+        case .image(let i):
+            var parts = ["Images", i.image.formats.map { $0.rawValue.uppercased() }.joined(separator: " / ")]
+            parts.append(describeSizes(i.renditions, label: effectiveImageLabel))
+            if let fit = fit(of: i.renditions), fit != .contain { parts.append(fit.rawValue) }
+            if let q = i.image.quality, !q.isEmpty {
+                let values = Set(q.values)
+                parts.append(values.count == 1 ? "quality \(values.first!)" : q.sorted { $0.key.rawValue < $1.key.rawValue }
+                    .map { "\($0.key.rawValue.uppercased()) \($0.value)" }.joined(separator: " / "))
             }
-            if let fit = spec.fit, fit != .contain { parts.append(fit.rawValue) }
-            if let quality = image.quality { parts.append("quality \(quality)") }
-            if image.lossless == true { parts.append("lossless") }
-            if let frames = image.frames {
-                let n = frames.atSeconds?.count ?? frames.count ?? 1
+            if i.image.lossless == true { parts.append("lossless") }
+            if i.image.frames != .poster {
+                let n = i.image.frames.stillCount
                 parts.append(n == 1 ? "1 frame" : "\(n) frames")
             }
             return parts.joined(separator: " · ")
-        }
-        if spec.mode == .audio {
-            var parts = ["\(codecName(audioCodec(spec) ?? .mp3)) audio"]
-            if let file = audioContainer(spec), file != .mp3 { parts.append(".\(file.rawValue)") }
-            if let bitrate = spec.audio?.bitrate { parts.append(bitrate) }
-            if let channels = spec.audio?.channels, channels != .source { parts.append(channels.rawValue) }
-            if let depth = spec.audio?.bitDepth, depth != .source { parts.append("\(depth.rawValue)-bit") }
+        case .audio(let a):
+            guard let e = a.audio.encoding else { return "No audio" }
+            var parts = ["\(e.codec.displayName) audio"]
+            if a.container.format != .mp3 { parts.append(".\(a.container.format.rawValue)") }
+            if let bitrate = e.bitrate, bitrate != AudioEncoding.standard { parts.append(bitrate) }
+            if e.channels != .source { parts.append(e.channels.rawValue) }
+            if let depth = e.bitDepth, depth != .source { parts.append("\(depth.rawValue)-bit") }
+            return parts.joined(separator: " · ")
+        case .video(let v):
+            var parts = [v.container.format == .hls ? "HLS" : "MP4", Catalog.codecName(v.video.codec)]
+            parts.append(describeSizes(v.renditions, label: effectiveLabel))
+            if let fit = fit(of: v.renditions), fit != .contain { parts.append(fit.rawValue) }
+            if upscales(v.renditions) { parts.append("upscale") }
+            if v.video.color != .sdr { parts.append(v.video.color.rawValue.uppercased()) }
+            switch v.video.rate {
+            case .crf(let crf): parts.append("crf \(crf)")
+            case .cbr(let cbr): parts.append(describeCbr(v, cbr))
+            case .quality(let level): parts.append(level.replacingOccurrences(of: "_", with: " "))
+            }
             return parts.joined(separator: " · ")
         }
-        var parts = [spec.mode == .hls ? "HLS" : "MP4", Catalog.codecName(spec.codec ?? .av1)]
-        if let r = spec.renditions, !r.isEmpty {
-            parts.append(r.map(effectiveLabel).joined(separator: " / "))
-        } else if let ladder = spec.ladder {
-            parts.append(ladder.maxShortSide.map { "ladder ≤ \($0)p" } ?? "auto ladder")
-        } else {
-            parts.append("source resolution")
-        }
-        if let fit = spec.fit, fit != .contain { parts.append(fit.rawValue) }
-        if spec.upscale == true { parts.append("upscale") }
-        if let color = spec.color, color != .sdr { parts.append(color.rawValue.uppercased()) }
-        if let crf = spec.quality?.crf { parts.append("crf \(crf)") }
-        else if let q = spec.quality, q.isCbr { parts.append(describeCbr(spec, q)) }
-        else if let target = spec.quality?.target { parts.append(target.replacingOccurrences(of: "_", with: " ")) }
-        return parts.joined(separator: " · ")
     }
-}
 
-extension SpecTools {
-    /// `CBR 5 / 3 Mb/s`, `CBR 5 Mb/s` or `CBR (default rates)`.
-    fileprivate static func describeCbr(_ spec: OutputSpec, _ q: Quality) -> String {
-        let shared = q.bitrate.flatMap(parseBitrate)
-        let renditions = spec.renditions ?? []
+    private static func describeSizes(_ renditions: Renditions, label: (RenditionSize) -> String) -> String {
+        switch renditions {
+        case .sizes(let sizes): return sizes.map(label).joined(separator: " / ")
+        case .ladder(let ladder): return "ladder ≤ \(ladder.maxShortSide)p"
+        case .sourceSize: return "source size"
+        }
+    }
+
+    /// The fit every size shares; nil when they differ.
+    private static func fit(of renditions: Renditions) -> Fit? {
+        switch renditions {
+        case .sizes(let sizes): return Set(sizes.map(\.fit)).count == 1 ? sizes.first?.fit : nil
+        case .ladder(let l): return l.fit
+        case .sourceSize(let s): return s.fit
+        }
+    }
+
+    private static func upscales(_ renditions: Renditions) -> Bool {
+        switch renditions {
+        case .sizes(let sizes): return sizes.contains(where: \.upscale)
+        case .ladder(let l): return l.upscale
+        case .sourceSize(let s): return s.upscale
+        }
+    }
+
+    /// `CBR 5 / 3 Mb/s`, `CBR 5 Mb/s` or `CBR (standard rates)`.
+    fileprivate static func describeCbr(_ output: VideoOutput, _ cbr: ConstantBitRate) -> String {
+        let shared = cbr.bitrate == ConstantBitRate.standard ? nil : parseBitrate(cbr.bitrate)
+        let fps: Double? = { if case .fps(let n) = output.video.frameRate.max { return n }; return nil }()
         let rates: [Int]
-        if !renditions.isEmpty, shared != nil || renditions.contains(where: { $0.bitrate != nil }) {
-            rates = renditions.map { r in
-                r.bitrate.flatMap(parseBitrate) ?? shared
-                    ?? defaultCbrRate(codec: spec.codec ?? .av1, width: r.width, height: r.height, fps: spec.maxFps)
+        switch output.renditions {
+        case .sizes(let sizes) where shared != nil || sizes.contains(where: { $0.cbrBitrate.flatMap(parseBitrate) != nil }):
+            rates = sizes.map { s in
+                s.cbrBitrate.flatMap(parseBitrate) ?? shared
+                    ?? standardCbrRate(codec: output.video.codec, width: s.width, height: s.height, fps: fps)
             }
-        } else if let shared {
+        default:
+            guard let shared else { return "CBR (standard rates)" }
             rates = [shared]
-        } else {
-            return "CBR (default rates)"
         }
         return "CBR " + rates.map { trimNumber(Double($0) / 1e6) }.joined(separator: " / ") + " Mb/s"
     }

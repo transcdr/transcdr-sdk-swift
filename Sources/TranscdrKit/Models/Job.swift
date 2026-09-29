@@ -313,6 +313,10 @@ public struct Job: Codable, Hashable, Sendable, Identifiable {
     public var input: JobInput
     public var inputInfo: MediaInfo?
     public var presetId: String?
+    /// The preset version and overrides the spec was resolved from; nil for a job given its
+    /// whole spec.
+    public var preset: PresetProvenance?
+    /// The resolved, complete spec: what runs. Rerunning or duplicating a job uses it.
     public var output: OutputSpec
     public var priority: Priority
     public var progress: Progress
@@ -335,7 +339,7 @@ public struct Job: Codable, Hashable, Sendable, Identifiable {
     public var updatedAt: Date?
 
     enum CodingKeys: String, CodingKey {
-        case id, kind, status, input, output, priority, progress, outputs, error, metadata, attempts, billing, livemode
+        case id, kind, status, input, preset, output, priority, progress, outputs, error, metadata, attempts, billing, livemode
         case inputInfo = "input_info"
         case presetId = "preset_id"
         case playlistUrl = "playlist_url"
@@ -357,7 +361,8 @@ public struct Job: Codable, Hashable, Sendable, Identifiable {
         input = try c.decodeIfPresent(JobInput.self, forKey: .input) ?? .unknown(type: "")
         inputInfo = try c.decodeIfPresent(MediaInfo.self, forKey: .inputInfo)
         presetId = try c.decodeIfPresent(String.self, forKey: .presetId)
-        output = try c.decodeIfPresent(OutputSpec.self, forKey: .output) ?? OutputSpec()
+        preset = try c.decodeIfPresent(PresetProvenance.self, forKey: .preset)
+        output = try c.decode(OutputSpec.self, forKey: .output)
         priority = try c.decodeIfPresent(Priority.self, forKey: .priority) ?? .normal
         progress = try c.decodeIfPresent(Progress.self, forKey: .progress) ?? Progress()
         outputs = try c.decodeList([JobOutput].self, forKey: .outputs)
@@ -378,12 +383,19 @@ public struct Job: Codable, Hashable, Sendable, Identifiable {
     }
 }
 
+/// What a job makes: a preset (with optional overrides), or a whole spec. There is no third
+/// choice: a request always says what it produces.
+public enum JobSpec: Hashable, Sendable {
+    /// A preset: a system slug (`hls-h264-abr`), your preset's slug or `pre_…` id for its latest
+    /// version, or `slug@N` for version N. `overrides` merge over it; the result must be complete.
+    case preset(String, overrides: OutputOverrides?)
+    /// A whole, complete spec. Checked with `OutputRules` before it is sent.
+    case output(OutputSpec)
+}
+
 public struct JobCreateParams: Encodable, Sendable {
     public var input: JobInput
-    /// Overrides merged over the preset's spec (see `SpecTools.diff`).
-    public var output: OutputSpecInput?
-    /// A system preset slug (e.g. `hls-av1-abr`) or a `pre_…` id.
-    public var preset: String?
+    public var spec: JobSpec
     public var priority: Priority?
     public var metadata: Metadata?
     public var webhookUrl: String?
@@ -392,12 +404,11 @@ public struct JobCreateParams: Encodable, Sendable {
     public var maxCostCents: Int?
 
     public init(
-        input: JobInput, output: OutputSpecInput? = nil, preset: String? = nil, priority: Priority? = nil,
-        metadata: Metadata? = nil, webhookUrl: String? = nil, destination: JobDestination? = nil, maxCostCents: Int? = nil
+        input: JobInput, spec: JobSpec, priority: Priority? = nil, metadata: Metadata? = nil, webhookUrl: String? = nil,
+        destination: JobDestination? = nil, maxCostCents: Int? = nil
     ) {
         self.input = input
-        self.output = output
-        self.preset = preset
+        self.spec = spec
         self.priority = priority
         self.metadata = metadata
         self.webhookUrl = webhookUrl
@@ -414,8 +425,13 @@ public struct JobCreateParams: Encodable, Sendable {
     public func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
         try c.encode(input, forKey: .input)
-        if let output, !output.isEmpty { try c.encode(output, forKey: .output) }
-        try c.encodeIfPresent(preset, forKey: .preset)
+        switch spec {
+        case .preset(let preset, let overrides):
+            try c.encode(preset, forKey: .preset)
+            if let overrides, !overrides.isEmpty { try c.encode(overrides, forKey: .output) }
+        case .output(let output):
+            try c.encode(output, forKey: .output)
+        }
         try c.encodeIfPresent(priority, forKey: .priority)
         if let metadata, !metadata.isEmpty { try c.encode(metadata, forKey: .metadata) }
         try c.encodeIfPresent(webhookUrl, forKey: .webhookUrl)
@@ -618,16 +634,22 @@ public struct Preset: Codable, Hashable, Sendable, Identifiable {
     /// Minimum versions and conditions, keyed by `Platform.rawValue`, for
     /// each platform in `compatibility`.
     public var compatibilityNotes: [String: String]
+    /// Its latest version. Versions never change: editing the output adds one.
+    public var version: Int
+    /// The latest version's spec, complete.
     public var output: OutputSpec
     public var metadata: Metadata
     public var createdAt: Date?
     public var updatedAt: Date?
 
+    /// `slug@N`: this exact version, as a job's `preset` names it.
+    public var pinned: String { "\(slug)@\(version)" }
+
     /// This platform's note, if it has one.
     public func note(for platform: Platform) -> String? { compatibilityNotes[platform.rawValue] }
 
     enum CodingKeys: String, CodingKey {
-        case id, slug, name, description, system, category, compatibility, output, metadata
+        case id, slug, name, description, system, category, compatibility, version, output, metadata
         case compatibilityNotes = "compatibility_notes"
         case createdAt = "created_at"
         case updatedAt = "updated_at"
@@ -643,20 +665,70 @@ public struct Preset: Codable, Hashable, Sendable, Identifiable {
         category = try c.decodeIfPresent(PresetCategory.self, forKey: .category)
         compatibility = try c.decodeList([Platform].self, forKey: .compatibility)
         compatibilityNotes = try c.decodeMap([String: String].self, forKey: .compatibilityNotes)
-        output = try c.decodeIfPresent(OutputSpec.self, forKey: .output) ?? OutputSpec()
+        version = try c.decodeIfPresent(Int.self, forKey: .version) ?? 1
+        output = try c.decode(OutputSpec.self, forKey: .output)
         metadata = try c.decodeMap(Metadata.self, forKey: .metadata)
         createdAt = try c.decodeIfPresent(Date.self, forKey: .createdAt)
         updatedAt = try c.decodeIfPresent(Date.self, forKey: .updatedAt)
     }
 }
 
-/// Create, or update (`PATCH`: only what changes; `output` merges into the stored spec).
+/// One version of a preset: a complete spec that never changes.
+public struct PresetVersion: Codable, Hashable, Sendable {
+    public var version: Int
+    public var output: OutputSpec
+    /// Nil for a system preset's versions.
+    public var createdAt: Date?
+
+    enum CodingKeys: String, CodingKey {
+        case version, output
+        case createdAt = "created_at"
+    }
+}
+
+/// A new preset (`POST`): `output` is its complete spec, version 1.
+public struct PresetCreateParams: Encodable, Sendable {
+    public var name: String
+    public var output: OutputSpec
+    public var slug: String?
+    public var description: String?
+    public var metadata: Metadata?
+    /// Your own category; left out, it is derived from `output`.
+    public var category: PresetCategory?
+    /// The platforms to claim; left out, they are derived from `output`.
+    public var compatibility: [Platform]?
+    /// Notes over the derived ones, keyed by `Platform.rawValue`, only for platforms the preset
+    /// claims; 1–500 characters each.
+    public var compatibilityNotes: [String: String]?
+
+    public init(
+        name: String, output: OutputSpec, slug: String? = nil, description: String? = nil, metadata: Metadata? = nil,
+        category: PresetCategory? = nil, compatibility: [Platform]? = nil, compatibilityNotes: [String: String]? = nil
+    ) {
+        self.name = name
+        self.output = output
+        self.slug = slug
+        self.description = description
+        self.metadata = metadata
+        self.category = category
+        self.compatibility = compatibility
+        self.compatibilityNotes = compatibilityNotes
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case name, output, slug, description, metadata, category, compatibility
+        case compatibilityNotes = "compatibility_notes"
+    }
+}
+
+/// A change (`PATCH`): only what changes. `output` merges over the latest version, and a
+/// changed spec is a new version.
 public struct PresetParams: Encodable, Sendable {
     public var name: String?
     public var slug: String?
     public var description: String?
-    /// A preset's full spec: `OutputSpecInput(spec)`; on update, a diff works too.
-    public var output: OutputSpecInput?
+    /// Fields over the latest version (see `OutputOverrides`); the result must be complete.
+    public var output: OutputOverrides?
     public var metadata: Metadata?
     /// Your own category; left out, it is derived from `output`.
     public var category: PresetCategory?
@@ -676,7 +748,7 @@ public struct PresetParams: Encodable, Sendable {
     }
 
     public init(
-        name: String? = nil, slug: String? = nil, description: String? = nil, output: OutputSpecInput? = nil, metadata: Metadata? = nil,
+        name: String? = nil, slug: String? = nil, description: String? = nil, output: OutputOverrides? = nil, metadata: Metadata? = nil,
         category: PresetCategory? = nil, compatibility: [Platform]? = nil, compatibilityNotes: [String: String]? = nil, clear: Set<Field> = []
     ) {
         self.name = name
@@ -708,13 +780,12 @@ public struct PresetParams: Encodable, Sendable {
     }
 }
 
-/// A whole preset, for `presets.replace` (`PUT`). `output` is the full spec: a
-/// field left out takes its default, as on create. `description` and `metadata`
-/// left out are emptied; `category`, `compatibility` and `compatibilityNotes`
-/// left out are derived again; `slug` left out is kept.
+/// A whole preset, for `presets.replace` (`PUT`). `output` is the complete spec; a changed
+/// spec is a new version. `description` and `metadata` left out are emptied; `category`,
+/// `compatibility` and `compatibilityNotes` left out are derived again; `slug` left out is kept.
 public struct PresetReplaceParams: Encodable, Sendable {
     public var name: String
-    public var output: OutputSpecInput
+    public var output: OutputSpec
     public var slug: String?
     public var description: String?
     public var metadata: Metadata?
@@ -724,7 +795,7 @@ public struct PresetReplaceParams: Encodable, Sendable {
     public var compatibilityNotes: [String: String]?
 
     public init(
-        name: String, output: OutputSpecInput, slug: String? = nil, description: String? = nil, metadata: Metadata? = nil,
+        name: String, output: OutputSpec, slug: String? = nil, description: String? = nil, metadata: Metadata? = nil,
         category: PresetCategory? = nil, compatibility: [Platform]? = nil, compatibilityNotes: [String: String]? = nil
     ) {
         self.name = name

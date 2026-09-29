@@ -7,7 +7,7 @@ final class PresetCompatibilityTests: XCTestCase {
     {"object":"preset","id":"web-av1-1080p","slug":"web-av1-1080p","name":"Web AV1 1080p","system":true,
      "category":"web","compatibility":["web","android","smart_tv","vr_headset"],
      "compatibility_notes":{"web":"Chrome 70+","android":"Android 10+","smart_tv":"TVs with AV1 decode"},
-     "output":{}}
+     "output":\#(specJSON)}
     """#
 
     func testCategoryCompatibilityAndNotesDecode() throws {
@@ -19,7 +19,7 @@ final class PresetCompatibilityTests: XCTestCase {
     }
 
     func testAnOlderServerDecodesWithoutThem() throws {
-        let p = try TranscdrCoding.decoder.decode(Preset.self, from: Data(#"{"id":"pre_1","output":{}}"#.utf8))
+        let p = try TranscdrCoding.decoder.decode(Preset.self, from: Data(#"{"id":"pre_1","output":\#(specJSON)}"#.utf8))
         XCTAssertNil(p.category)
         XCTAssertEqual(p.compatibility, [])
         XCTAssertEqual(p.compatibilityNotes, [:])
@@ -44,7 +44,7 @@ final class PresetCompatibilityTests: XCTestCase {
         let t = MockTransport(Array(repeating: MockTransport.json(200, preset), count: 3))
         let c = client(t)
         _ = try await c.presets.create(.init(
-            name: "Phones", output: OutputSpecInput(json: [:]), category: .mobile,
+            name: "Phones", output: sampleSpec, category: .mobile,
             compatibility: [.ios, .android], compatibilityNotes: ["ios": "Our app only."]
         ))
         XCTAssertEqual(t.sent[0].json?["category"], "mobile")
@@ -54,7 +54,7 @@ final class PresetCompatibilityTests: XCTestCase {
         _ = try await c.presets.update("pre_1", .init(clear: [.category, .compatibility, .compatibilityNotes]))
         XCTAssertEqual(t.sent[1].json, ["category": nil, "compatibility": nil, "compatibility_notes": nil])
 
-        _ = try await c.presets.replace("pre_1", .init(name: "Phones", output: OutputSpecInput(json: [:]), category: .tv))
-        XCTAssertEqual(t.sent[2].json, ["name": "Phones", "output": [:], "category": "tv"])
+        _ = try await c.presets.replace("pre_1", .init(name: "Phones", output: sampleSpec, category: .tv))
+        XCTAssertEqual(t.sent[2].json, ["name": "Phones", "output": try JSONValue.from(sampleSpec), "category": "tv"])
     }
 }
