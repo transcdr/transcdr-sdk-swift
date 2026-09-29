@@ -134,6 +134,16 @@ final class OutputSpecTests: XCTestCase {
                        ["location": "approximate", "capture_time": "date", "device": "keep", "descriptive": "strip"])
         XCTAssertEqual(try JSONValue.from(Privacy.fields(fields)).decode(as: Privacy.self), .fields(fields))
         XCTAssertEqual(Privacy.preset(.stripLocation).resolved.captureTime, .keep)
+
+        // A preset refined by any of the categories.
+        let refined = Privacy.preset(.stripAll, refine: PrivacyRefinements(location: nil, captureTime: .date, device: nil, descriptive: nil))
+        XCTAssertEqual(try JSONValue.from(refined), ["preset": "strip_all", "capture_time": "date"])
+        XCTAssertEqual(try j(["preset": "strip_all", "capture_time": "date"]).decode(as: Privacy.self), refined)
+        XCTAssertEqual(refined.resolved, PrivacyFields(location: .strip, captureTime: .date, device: .strip, descriptive: .strip))
+        XCTAssertEqual(try JSONValue.from(Privacy.preset(.keepAll)), ["preset": "keep_all"])
+        guard case .audio(var a) = Self.mp3 else { return XCTFail() }
+        a.privacy = refined
+        XCTAssertEqual(OutputSpec.audio(a).missingFields, [])
         XCTAssertThrowsError(try j(["kind": "hologram", "privacy": ["preset": "strip_all"]]).decode(as: OutputSpec.self))
     }
 
@@ -242,7 +252,7 @@ final class OutputSpecTests: XCTestCase {
 
     let job = """
     {"object":"job","id":"job_1","status":"queued","input":{"type":"url","url":"https://x/y.mov"},"priority":"normal",
-     "preset":{"id":"social-vertical-1080x1920","version":1,"overrides":{"video":{"frame_rate":{"max":24}}}},
+     "preset":{"id":"social-vertical-1080x1920","slug":"social-vertical-1080x1920","version":1,"overrides":{"video":{"frame_rate":{"max":24}}}},
      "output":\(String(decoding: try! TranscdrCoding.encoder.encode(OutputSpecTests.mp4), as: UTF8.self)),
      "progress":{"percent":0,"stage":"waiting","renditions":[]},"outputs":[],"metadata":{},"attempts":0,
      "max_attempts":3,"created_at":"2026-09-27T05:18:43Z"}

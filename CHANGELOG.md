@@ -15,7 +15,9 @@ the v1 output spec" for the whole field mapping.
 - Exclusive choices are enums with associated values: `VideoRate`
   (`.quality`, `.crf`, `.cbr`), `Renditions` (`.sizes`, `.ladder`,
   `.sourceSize`), `Subtitles`, `Gop`, `ImageFrames`, `Privacy`, `AudioTrack`
-  (`.auto`, `.encode`, `.drop`), `TrimEnd` and `FrameRateMax`.
+  (`.auto`, `.encode`, `.drop`), `TrimEnd` and `FrameRateMax`. `Privacy` is
+  `.preset(_, refine:)`, a preset that any category may refine
+  (`PrivacyRefinements`), or `.fields(_)` stating all four.
 - Values that follow the source are written out: `.source`, `"standard"`,
   `.fromColor`, `.bySize`, `.poster`, `.segment`, `.all`.
 - `JobCreateParams(input:spec:)` takes a `JobSpec`: `.preset(ref, overrides:)`
@@ -35,6 +37,12 @@ the v1 output spec" for the whole field mapping.
   and returns nil when the result is incomplete.
 - `FlacCompression.default` is `.balanced`.
 
+### Removed
+
+- The operator console's infrastructure details: `AdminPoolStatus`,
+  `AdminOverview.gpuPool`, `AdminJobInternals` and `AdminJob.internals`. They
+  describe how the service runs, not the API a customer uses.
+
 ### Added
 
 - `OutputRules`: the API's required-field table, and `spec.missingFields` /
@@ -46,8 +54,8 @@ the v1 output spec" for the whole field mapping.
   an incomplete one.
 - `TranscdrError.errors`: every failure of a refused output spec
   (`[FieldError]`); `fieldErrors` includes them.
-- `Job.preset`: `PresetProvenance` (`id`, `version`, `overrides`), nil for a
-  job given its whole spec.
+- `Job.preset`: `PresetProvenance` (`id`, `slug`, `version`, `overrides`), nil
+  for a job given its whole spec; `pinned` is `slug@version`.
 - `Preset.version` and `Preset.pinned`; `presets.versions(_:)`,
   `presets.version(_:_:)` and `presets.retrieve(_:version:)`.
 - `Automation.resolvedOutput`: the spec its preset and overrides resolve to now.

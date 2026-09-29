@@ -1014,17 +1014,21 @@ public struct DescriptiveHandling: OpenEnum {
     public static let all: [Self] = [.strip, .keep]
 }
 
-/// Which identifying metadata survives: a preset, or every category stated. Responses always
-/// state every category.
+/// Which identifying metadata survives: a preset, which any of the categories may refine, or
+/// every category stated. Responses always state every category, without a preset.
 public enum Privacy: Codable, Hashable, Sendable {
-    case preset(PrivacyPreset)
+    /// A starting point; each category set in `refine` overrides it.
+    case preset(PrivacyPreset, refine: PrivacyRefinements)
     case fields(PrivacyFields)
+
+    /// A preset as it is.
+    public static func preset(_ preset: PrivacyPreset) -> Privacy { .preset(preset, refine: .none) }
 
     enum Key: String, CodingKey { case preset }
 
     public init(from decoder: Decoder) throws {
         if let preset = try decoder.container(keyedBy: Key.self).decodeIfPresent(PrivacyPreset.self, forKey: .preset) {
-            self = .preset(preset)
+            self = .preset(preset, refine: try PrivacyRefinements(from: decoder))
         } else {
             self = .fields(try PrivacyFields(from: decoder))
         }
@@ -1032,21 +1036,61 @@ public enum Privacy: Codable, Hashable, Sendable {
 
     public func encode(to encoder: Encoder) throws {
         switch self {
-        case .preset(let p):
+        case .preset(let p, let refine):
             var c = encoder.container(keyedBy: Key.self)
             try c.encode(p, forKey: .preset)
+            try refine.encode(to: encoder)
         case .fields(let f): try f.encode(to: encoder)
         }
     }
 
-    /// Every category, a preset expanded.
+    /// Every category: a preset expanded, then refined.
     public var resolved: PrivacyFields {
         switch self {
         case .fields(let f): return f
-        case .preset(.stripLocation): return PrivacyFields(location: .strip, captureTime: .keep, device: .keep, descriptive: .keep)
-        case .preset(.keepAll): return PrivacyFields(location: .keep, captureTime: .keep, device: .keepAll, descriptive: .keep)
-        case .preset: return PrivacyFields(location: .strip, captureTime: .strip, device: .strip, descriptive: .strip)
+        case .preset(let preset, let refine):
+            let base: PrivacyFields
+            switch preset {
+            case .stripLocation: base = PrivacyFields(location: .strip, captureTime: .keep, device: .keep, descriptive: .keep)
+            case .keepAll: base = PrivacyFields(location: .keep, captureTime: .keep, device: .keepAll, descriptive: .keep)
+            default: base = PrivacyFields(location: .strip, captureTime: .strip, device: .strip, descriptive: .strip)
+            }
+            return PrivacyFields(
+                location: refine.location ?? base.location, captureTime: refine.captureTime ?? base.captureTime,
+                device: refine.device ?? base.device, descriptive: refine.descriptive ?? base.descriptive
+            )
         }
+    }
+}
+
+/// Categories set over a privacy preset; nil keeps the preset's.
+public struct PrivacyRefinements: Codable, Hashable, Sendable {
+    public var location: LocationHandling?
+    public var captureTime: CaptureTimeHandling?
+    public var device: DeviceHandling?
+    public var descriptive: DescriptiveHandling?
+
+    public init(location: LocationHandling?, captureTime: CaptureTimeHandling?, device: DeviceHandling?, descriptive: DescriptiveHandling?) {
+        self.location = location
+        self.captureTime = captureTime
+        self.device = device
+        self.descriptive = descriptive
+    }
+
+    /// Nothing over the preset.
+    public static let none = PrivacyRefinements(location: nil, captureTime: nil, device: nil, descriptive: nil)
+
+    enum CodingKeys: String, CodingKey {
+        case location, device, descriptive
+        case captureTime = "capture_time"
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encodeIfPresent(location, forKey: .location)
+        try c.encodeIfPresent(captureTime, forKey: .captureTime)
+        try c.encodeIfPresent(device, forKey: .device)
+        try c.encodeIfPresent(descriptive, forKey: .descriptive)
     }
 }
 
@@ -1103,21 +1147,33 @@ public struct OutputOverrides: Codable, Hashable, Sendable, ExpressibleByDiction
 
 /// Where a job's spec came from: the preset version and the request's overrides over it.
 public struct PresetProvenance: Codable, Hashable, Sendable {
-    /// The preset as the request named it: a slug or a `pre_…` id.
+    /// The preset's id (`pre_…`, or a system preset's slug).
     public var id: String
+    public var slug: String
     /// The version the job resolved against.
     public var version: Int?
     /// The request's `output` over the preset, in v2; nil when none was sent.
     public var overrides: OutputOverrides?
 
-    public init(id: String, version: Int?, overrides: OutputOverrides?) {
+    public init(id: String, slug: String, version: Int?, overrides: OutputOverrides?) {
         self.id = id
+        self.slug = slug
         self.version = version
         self.overrides = overrides
     }
 
+    enum CodingKeys: String, CodingKey { case id, slug, version, overrides }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        slug = try c.decodeIfPresent(String.self, forKey: .slug) ?? id
+        version = try c.decodeIfPresent(Int.self, forKey: .version)
+        overrides = try c.decodeIfPresent(OutputOverrides.self, forKey: .overrides)
+    }
+
     /// `slug@N`: this exact version, as a job's `preset` would name it.
-    public var pinned: String { version.map { "\(id)@\($0)" } ?? id }
+    public var pinned: String { version.map { "\(slug)@\($0)" } ?? slug }
 }
 
 /// One validation failure: a dotted param (`output.audio.bitrate`) and the message.

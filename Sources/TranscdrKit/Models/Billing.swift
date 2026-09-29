@@ -954,78 +954,29 @@ public struct Stats: Codable, Hashable, Sendable {
 
 // MARK: - Operator console
 
-public struct AdminPoolStatus: Codable, Hashable, Sendable {
-    public var driver: String
-    public var pool: String
-    public var nodesTotal: Int
-    public var nodesReady: Int
-    public var gpusAllocatable: Int
-    public var pendingPods: Int
-
-    enum CodingKeys: String, CodingKey {
-        case driver, pool
-        case nodesTotal = "nodes_total"
-        case nodesReady = "nodes_ready"
-        case gpusAllocatable = "gpus_allocatable"
-        case pendingPods = "pending_pods"
-    }
-}
-
 public struct AdminOverview: Codable, Hashable, Sendable {
     public var organizations: Int
     public var jobsByStatus: [String: Int]
-    public var gpuPool: AdminPoolStatus?
 
     enum CodingKeys: String, CodingKey {
         case organizations
         case jobsByStatus = "jobs_by_status"
-        case gpuPool = "gpu_pool"
     }
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         organizations = try c.decodeIfPresent(Int.self, forKey: .organizations) ?? 0
         jobsByStatus = try c.decodeMap([String: Int].self, forKey: .jobsByStatus)
-        gpuPool = try? c.decodeIfPresent(AdminPoolStatus.self, forKey: .gpuPool)
     }
 }
 
-public struct AdminJobInternals: Codable, Hashable, Sendable {
-    public var node: String?
-    public var pod: String?
-    public var gpus: [String]
-    public var encoder: String?
-    public var dispatchRef: String?
-    public var heartbeatAt: Date?
-    public var rawError: JobError?
-
-    enum CodingKeys: String, CodingKey {
-        case node, pod, gpus, encoder
-        case dispatchRef = "dispatch_ref"
-        case heartbeatAt = "heartbeat_at"
-        case rawError = "raw_error"
-    }
-
-    public init(from decoder: Decoder) throws {
-        let c = try decoder.container(keyedBy: CodingKeys.self)
-        node = try c.decodeIfPresent(String.self, forKey: .node)
-        pod = try c.decodeIfPresent(String.self, forKey: .pod)
-        gpus = try c.decodeList([String].self, forKey: .gpus)
-        encoder = try c.decodeIfPresent(String.self, forKey: .encoder)
-        dispatchRef = try c.decodeIfPresent(String.self, forKey: .dispatchRef)
-        heartbeatAt = try c.decodeIfPresent(Date.self, forKey: .heartbeatAt)
-        rawError = try c.decodeIfPresent(JobError.self, forKey: .rawError)
-    }
-}
-
-/// A job as the operator console sees it: with its organization and internals.
+/// A job as the operator console sees it: with its organization.
 public struct AdminJob: Decodable, Hashable, Sendable, Identifiable {
     public var job: Job
     public var organization: String
-    public var internals: AdminJobInternals?
     public var id: String { job.id }
 
-    enum CodingKeys: String, CodingKey { case organization, internals }
+    enum CodingKeys: String, CodingKey { case organization }
 
     public init(from decoder: Decoder) throws {
         job = try Job(from: decoder)
@@ -1035,7 +986,6 @@ public struct AdminJob: Decodable, Hashable, Sendable, Identifiable {
         } else {
             organization = (try? c.decode(Int.self, forKey: .organization)).map(String.init) ?? ""
         }
-        internals = try? c.decodeIfPresent(AdminJobInternals.self, forKey: .internals)
     }
 }
 

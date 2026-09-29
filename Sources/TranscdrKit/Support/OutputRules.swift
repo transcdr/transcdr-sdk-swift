@@ -27,13 +27,17 @@ public enum OutputRules {
         public let need: Need
         /// An object whose own fields are checked; never reported missing itself.
         public let object: Bool
+        /// When it is needed (or, for an optional field or a choice, allowed).
         public let when: Condition
+        /// Where it may also be given without being needed; nil for nowhere else.
+        public let allowed: Condition?
 
-        init(path: String, _ need: Need, object: Bool, when: Condition) {
+        init(path: String, _ need: Need, object: Bool, when: Condition, allowed: Condition? = nil) {
             self.path = path
             self.need = need
             self.object = object
             self.when = when
+            self.allowed = allowed
         }
     }
 
@@ -103,10 +107,10 @@ public enum OutputRules {
         Field(path: "trim.end", .required, object: false, when: [[("kind", ["video"])]]),
         Field(path: "privacy", .required, object: true, when: [[]]),
         Field(path: "privacy.preset", .optional, object: false, when: [[]]),
-        Field(path: "privacy.location", .required, object: false, when: [[("privacy.preset", ["!"])]]),
-        Field(path: "privacy.capture_time", .required, object: false, when: [[("privacy.preset", ["!"])]]),
-        Field(path: "privacy.device", .required, object: false, when: [[("privacy.preset", ["!"])]]),
-        Field(path: "privacy.descriptive", .required, object: false, when: [[("privacy.preset", ["!"])]]),
+        Field(path: "privacy.location", .required, object: false, when: [[("privacy.preset", ["!"])]], allowed: [[]]),
+        Field(path: "privacy.capture_time", .required, object: false, when: [[("privacy.preset", ["!"])]], allowed: [[]]),
+        Field(path: "privacy.device", .required, object: false, when: [[("privacy.preset", ["!"])]], allowed: [[]]),
+        Field(path: "privacy.descriptive", .required, object: false, when: [[("privacy.preset", ["!"])]], allowed: [[]]),
     ]
 
     /// The exclusive groups.
@@ -206,11 +210,12 @@ public enum OutputRules {
         var refused: [String] = []
         for field in fields {
             if privacyMissing && field.path.hasPrefix("privacy") { continue }
-            let applies = holds(document, field.when)
+            let needed = holds(document, field.when)
+            let applies = needed || field.allowed.map { holds(document, $0) } == true
             for (path, value) in instances(document, field.path) {
                 if refused.contains(where: { path.hasPrefix($0 + ".") }) { continue }
                 if value != nil && !applies { refused.append(path) }
-                if value == nil, applies, field.need == .required, !field.object {
+                if value == nil, needed, field.need == .required, !field.object {
                     errors.append(error(path, "output.\(path) is required when \(describe(field.when))."))
                 } else if value != nil, !applies {
                     errors.append(error(

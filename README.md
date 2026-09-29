@@ -231,7 +231,7 @@ let job = try await client.jobs.create(.init(
     input: .asset(asset.id),
     spec: .preset("social-vertical-1080x1920@1", overrides: ["video": ["frame_rate": ["max": 24]]])
 ))
-print(job.preset?.id, job.preset?.version, job.preset?.overrides)  // where the spec came from
+print(job.preset?.slug, job.preset?.version, job.preset?.overrides)  // where the spec came from
 print(job.output)  // the resolved, complete spec: what runs
 
 let versions = try await client.presets.versions("my-preset")
@@ -289,9 +289,14 @@ or `.atSeconds([...])`. Images are billed per output image by pixel count
 
 ### Privacy
 
-`privacy` is `.preset(.stripAll)`, `.preset(.stripLocation)`,
-`.preset(.keepAll)`, or `.fields(PrivacyFields(location:captureTime:device:descriptive:))`
-stating every category. Responses state every category.
+`privacy` is a preset (`.preset(.stripAll)`, `.preset(.stripLocation)` or
+`.preset(.keepAll)`), which any of the four categories may refine, or
+`.fields(PrivacyFields(location:captureTime:device:descriptive:))` stating
+every category. Responses state every category, without a preset.
+
+```swift
+let dated = Privacy.preset(.stripAll, refine: PrivacyRefinements(location: nil, captureTime: .date, device: nil, descriptive: nil))
+```
 
 ### Errors
 
