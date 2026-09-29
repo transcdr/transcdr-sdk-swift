@@ -39,9 +39,10 @@ the v1 output spec" for the whole field mapping.
 
 ### Removed
 
-- The operator console's infrastructure details: `AdminPoolStatus`,
-  `AdminOverview.gpuPool`, `AdminJobInternals` and `AdminJob.internals`. They
-  describe how the service runs, not the API a customer uses.
+- The operator console models' infrastructure details: the overview's
+  capacity status (and its type) and a job's internals (`AdminJob.internals`
+  and its type). They describe how the service runs, not the API a customer
+  uses.
 
 ### Added
 
