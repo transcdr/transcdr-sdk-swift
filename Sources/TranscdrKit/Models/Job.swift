@@ -61,6 +61,17 @@ public struct Tier: OpenEnum {
     public static let hd: Self = "hd"
     public static let uhd: Self = "uhd"
     public static let all: [Self] = [.sd, .hd, .uhd]
+    /// An output image of up to 1 megapixel.
+    public static let upTo1mp: Self = "up_to_1mp"
+    /// An output image of over 1, up to 4 megapixels.
+    public static let upTo4mp: Self = "up_to_4mp"
+    /// An output image of over 4 megapixels.
+    public static let over4mp: Self = "over_4mp"
+    /// The image tiers, by the pixels an output image came out at.
+    public static let imageTiers: [Self] = [.upTo1mp, .upTo4mp, .over4mp]
+
+    /// One of `imageTiers`.
+    public var isImage: Bool { Self.imageTiers.contains(self) }
 }
 
 /// Where a job reads its input.
@@ -215,12 +226,21 @@ public struct JobOutput: Codable, Hashable, Sendable, Identifiable {
     /// Relative to the job's output root, e.g. `1080p.mp4`.
     public var path: String
     public var url: String
+    /// Image output: the file's format.
+    public var format: ImageFormat?
+    /// Image output: the rendition it was made for (its label, or the size it came out at).
+    public var rendition: String?
+    /// Image output of a video with several stills: which still, from 1.
+    public var frame: Int?
+    /// Image output of a video: the still's time, in seconds.
+    public var atSeconds: Double?
 
     public var id: String { label }
 
     enum CodingKeys: String, CodingKey {
-        case label, width, height, frames, bytes, path, url
+        case label, width, height, frames, bytes, path, url, format, rendition, frame
         case contentType = "content_type"
+        case atSeconds = "at_seconds"
     }
 
     public init(from decoder: Decoder) throws {
@@ -233,6 +253,26 @@ public struct JobOutput: Codable, Hashable, Sendable, Identifiable {
         contentType = try c.decodeIfPresent(String.self, forKey: .contentType) ?? "application/octet-stream"
         path = try c.decodeIfPresent(String.self, forKey: .path) ?? ""
         url = try c.decodeIfPresent(String.self, forKey: .url) ?? ""
+        format = try c.decodeIfPresent(ImageFormat.self, forKey: .format)
+        rendition = try c.decodeIfPresent(String.self, forKey: .rendition)
+        frame = try c.decodeIfPresent(Int.self, forKey: .frame)
+        atSeconds = try c.decodeIfPresent(Double.self, forKey: .atSeconds)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(label, forKey: .label)
+        try c.encode(width, forKey: .width)
+        try c.encode(height, forKey: .height)
+        try c.encode(frames, forKey: .frames)
+        try c.encode(bytes, forKey: .bytes)
+        try c.encode(contentType, forKey: .contentType)
+        try c.encode(path, forKey: .path)
+        try c.encode(url, forKey: .url)
+        try c.encodeIfPresent(format, forKey: .format)
+        try c.encodeIfPresent(rendition, forKey: .rendition)
+        try c.encodeIfPresent(frame, forKey: .frame)
+        try c.encodeIfPresent(atSeconds, forKey: .atSeconds)
     }
 }
 
@@ -245,10 +285,13 @@ public struct JobError: Codable, Hashable, Sendable {
 
 public struct JobBilling: Codable, Hashable, Sendable {
     public var billableMinutes: Double
+    /// Image output: the images billed (an image job bills no minutes).
+    public var billableImages: Int?
     /// Rounded up to the cent.
     public var amountCents: Int
     /// Exact, in dollars.
     public var amountUsd: Double?
+    /// `sd`, `hd` or `uhd`; for an image job one of `Tier.imageTiers`.
     public var tier: Tier?
     /// Seconds of output, once known.
     public var outputDuration: Double?
@@ -256,6 +299,7 @@ public struct JobBilling: Codable, Hashable, Sendable {
     enum CodingKeys: String, CodingKey {
         case tier
         case billableMinutes = "billable_minutes"
+        case billableImages = "billable_images"
         case amountCents = "amount_cents"
         case amountUsd = "amount_usd"
         case outputDuration = "output_duration"
@@ -536,8 +580,10 @@ public struct PresetCategory: OpenEnum {
     public static let audio: Self = "audio"
     /// Preservation and mastering: visually lossless, HDR.
     public static let archive: Self = "archive"
+    /// Still images.
+    public static let image: Self = "image"
     /// Every known category, in display order.
-    public static let all: [Self] = [.web, .mobile, .streaming, .tv, .social, .audio, .archive]
+    public static let all: [Self] = [.web, .mobile, .streaming, .tv, .social, .audio, .archive, .image]
 }
 
 /// Where an output plays. More may be added.

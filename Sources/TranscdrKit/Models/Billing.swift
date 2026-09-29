@@ -13,6 +13,8 @@ public struct UsagePoint: Codable, Hashable, Sendable, Identifiable {
     public var date: String
     public var jobs: Int
     public var billableMinutes: Double
+    /// Output images billed; 0 from a server without image output.
+    public var billableImages: Int
     public var amountCents: Int
     public var amountUsd: Double
 
@@ -21,6 +23,7 @@ public struct UsagePoint: Codable, Hashable, Sendable, Identifiable {
     enum CodingKeys: String, CodingKey {
         case date, jobs
         case billableMinutes = "billable_minutes"
+        case billableImages = "billable_images"
         case amountCents = "amount_cents"
         case amountUsd = "amount_usd"
     }
@@ -30,6 +33,7 @@ public struct UsagePoint: Codable, Hashable, Sendable, Identifiable {
         date = try c.decode(String.self, forKey: .date)
         jobs = try c.decodeIfPresent(Int.self, forKey: .jobs) ?? 0
         billableMinutes = try c.decodeIfPresent(Double.self, forKey: .billableMinutes) ?? 0
+        billableImages = try c.decodeIfPresent(Int.self, forKey: .billableImages) ?? 0
         amountCents = try c.decodeIfPresent(Int.self, forKey: .amountCents) ?? 0
         amountUsd = try c.decodeIfPresent(Double.self, forKey: .amountUsd) ?? Double(amountCents) / 100
     }
@@ -39,6 +43,8 @@ public struct Usage: Codable, Hashable, Sendable {
     public struct Totals: Codable, Hashable, Sendable {
         public var jobs: Int
         public var billableMinutes: Double
+        /// Output images billed; 0 from a server without image output.
+        public var billableImages: Int
         public var inputMinutes: Double
         public var outputBytes: Int64
         public var amountCents: Int
@@ -47,6 +53,7 @@ public struct Usage: Codable, Hashable, Sendable {
         enum CodingKeys: String, CodingKey {
             case jobs
             case billableMinutes = "billable_minutes"
+            case billableImages = "billable_images"
             case inputMinutes = "input_minutes"
             case outputBytes = "output_bytes"
             case amountCents = "amount_cents"
@@ -57,6 +64,7 @@ public struct Usage: Codable, Hashable, Sendable {
             let c = try decoder.container(keyedBy: CodingKeys.self)
             jobs = try c.decodeIfPresent(Int.self, forKey: .jobs) ?? 0
             billableMinutes = try c.decodeIfPresent(Double.self, forKey: .billableMinutes) ?? 0
+            billableImages = try c.decodeIfPresent(Int.self, forKey: .billableImages) ?? 0
             inputMinutes = try c.decodeIfPresent(Double.self, forKey: .inputMinutes) ?? 0
             outputBytes = try c.decodeIfPresent(Int64.self, forKey: .outputBytes) ?? 0
             amountCents = try c.decodeIfPresent(Int.self, forKey: .amountCents) ?? 0
@@ -70,13 +78,17 @@ public struct Usage: Codable, Hashable, Sendable {
     public var totals: Totals
     /// Billable minutes per tier (`sd`, `hd`, `uhd`).
     public var byTier: [String: Double]
-    /// Billable minutes per codec.
+    /// Output images billed per image tier (`up_to_1mp`, `up_to_4mp`, `over_4mp`); empty from
+    /// a server without image output.
+    public var byImageTier: [String: Int]
+    /// Billable minutes per codec (image jobs are not counted here).
     public var byCodec: [String: Double]
     public var series: [UsagePoint]
 
     enum CodingKeys: String, CodingKey {
         case from, to, granularity, totals, series
         case byTier = "by_tier"
+        case byImageTier = "by_image_tier"
         case byCodec = "by_codec"
     }
 
@@ -87,6 +99,7 @@ public struct Usage: Codable, Hashable, Sendable {
         granularity = try c.decodeIfPresent(Granularity.self, forKey: .granularity) ?? .day
         totals = try c.decode(Totals.self, forKey: .totals)
         byTier = try c.decodeMap([String: Double].self, forKey: .byTier)
+        byImageTier = try c.decodeMap([String: Int].self, forKey: .byImageTier)
         byCodec = try c.decodeMap([String: Double].self, forKey: .byCodec)
         series = try c.decodeList([UsagePoint].self, forKey: .series)
     }
@@ -119,6 +132,38 @@ public struct RateCard: Codable, Hashable, Sendable {
     }
 }
 
+/// Price per output image, in dollars, by the pixels it came out at.
+public struct ImageRateCard: Codable, Hashable, Sendable {
+    public var upTo1mp: Double
+    public var upTo4mp: Double
+    public var over4mp: Double
+    /// What each tier covers, e.g. `"up to 1 megapixel"`.
+    public var tiers: [String: String]
+
+    enum CodingKeys: String, CodingKey {
+        case tiers
+        case upTo1mp = "up_to_1mp"
+        case upTo4mp = "up_to_4mp"
+        case over4mp = "over_4mp"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        upTo1mp = try c.decodeIfPresent(Double.self, forKey: .upTo1mp) ?? 0
+        upTo4mp = try c.decodeIfPresent(Double.self, forKey: .upTo4mp) ?? 0
+        over4mp = try c.decodeIfPresent(Double.self, forKey: .over4mp) ?? 0
+        tiers = try c.decodeMap([String: String].self, forKey: .tiers)
+    }
+
+    public func rate(for tier: Tier) -> Double {
+        switch tier {
+        case .upTo1mp: return upTo1mp
+        case .upTo4mp: return upTo4mp
+        default: return over4mp
+        }
+    }
+}
+
 public struct Plan: Codable, Hashable, Sendable, Identifiable {
     public var id: PlanID
     public var name: String
@@ -131,6 +176,8 @@ public struct Plan: Codable, Hashable, Sendable, Identifiable {
     public var trialCreditCents: Int
     public var trialDays: Int
     public var rates: RateCard?
+    /// Image output prices; nil from a server without image output.
+    public var imageRates: ImageRateCard?
     public var maxConcurrentJobs: Int
     public var maxResolution: Int
     public var maxInputBytes: Int64?
@@ -142,6 +189,7 @@ public struct Plan: Codable, Hashable, Sendable, Identifiable {
     enum CodingKeys: String, CodingKey {
         case id, name, tagline, subscription, rates, priority, features
         case priceCents = "price_cents"
+        case imageRates = "image_rates"
         case monthlyCreditCents = "monthly_credit_cents"
         case creditValueRatio = "credit_value_ratio"
         case trialCreditCents = "trial_credit_cents"
@@ -165,6 +213,7 @@ public struct Plan: Codable, Hashable, Sendable, Identifiable {
         trialCreditCents = try c.decodeIfPresent(Int.self, forKey: .trialCreditCents) ?? 0
         trialDays = try c.decodeIfPresent(Int.self, forKey: .trialDays) ?? 0
         rates = try? c.decodeIfPresent(RateCard.self, forKey: .rates)
+        imageRates = try? c.decodeIfPresent(ImageRateCard.self, forKey: .imageRates)
         maxConcurrentJobs = try c.decodeIfPresent(Int.self, forKey: .maxConcurrentJobs) ?? 1
         maxResolution = try c.decodeIfPresent(Int.self, forKey: .maxResolution) ?? 1080
         maxInputBytes = try c.decodeIfPresent(Int64.self, forKey: .maxInputBytes)
@@ -312,11 +361,15 @@ public struct CreditAccount: Codable, Hashable, Sendable {
 public struct Billing: Codable, Hashable, Sendable {
     public var plan: Plan
     public var rates: RateCard?
+    /// Image output prices; nil from a server without image output.
+    public var imageRates: ImageRateCard?
     public var account: CreditAccount
     public var period: String
     public var periodStart: Date?
     public var periodEnd: Date?
     public var usageMinutes: Double
+    /// Output images billed this period.
+    public var usageImages: Int
     public var usageUsd: Double
     /// False when this installation takes no payments.
     public var paymentsEnabled: Bool
@@ -325,7 +378,9 @@ public struct Billing: Codable, Hashable, Sendable {
         case plan, rates, account, period
         case periodStart = "period_start"
         case periodEnd = "period_end"
+        case imageRates = "image_rates"
         case usageMinutes = "usage_minutes"
+        case usageImages = "usage_images"
         case usageUsd = "usage_usd"
         case paymentsEnabled = "payments_enabled"
     }
@@ -334,11 +389,13 @@ public struct Billing: Codable, Hashable, Sendable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         plan = try c.decode(Plan.self, forKey: .plan)
         rates = try? c.decodeIfPresent(RateCard.self, forKey: .rates)
+        imageRates = try? c.decodeIfPresent(ImageRateCard.self, forKey: .imageRates)
         account = try c.decode(CreditAccount.self, forKey: .account)
         period = try c.decodeIfPresent(String.self, forKey: .period) ?? ""
         periodStart = try c.decodeIfPresent(Date.self, forKey: .periodStart)
         periodEnd = try c.decodeIfPresent(Date.self, forKey: .periodEnd)
         usageMinutes = try c.decodeIfPresent(Double.self, forKey: .usageMinutes) ?? 0
+        usageImages = try c.decodeIfPresent(Int.self, forKey: .usageImages) ?? 0
         usageUsd = try c.decodeIfPresent(Double.self, forKey: .usageUsd) ?? 0
         paymentsEnabled = try c.decodeIfPresent(Bool.self, forKey: .paymentsEnabled) ?? true
     }
@@ -478,6 +535,7 @@ public struct StatementLine: Codable, Hashable, Sendable {
     public var creditUsd: Double
     public var date: Date?
     public var quantity: Double?
+    /// `output_minute` or `output_image`.
     public var unit: String?
 
     enum CodingKeys: String, CodingKey {
@@ -506,6 +564,8 @@ public struct Statement: Codable, Hashable, Sendable, Identifiable {
     public var status: String
     public var lines: [StatementLine]
     public var usageMinutes: Double
+    /// Output images billed this period.
+    public var usageImages: Int
     public var usageCents: Int
 
     enum CodingKeys: String, CodingKey {
@@ -513,6 +573,7 @@ public struct Statement: Codable, Hashable, Sendable, Identifiable {
         case periodStart = "period_start"
         case periodEnd = "period_end"
         case usageMinutes = "usage_minutes"
+        case usageImages = "usage_images"
         case usageCents = "usage_cents"
     }
 
@@ -525,6 +586,7 @@ public struct Statement: Codable, Hashable, Sendable, Identifiable {
         status = try c.decodeIfPresent(String.self, forKey: .status) ?? "open"
         lines = try c.decodeList([StatementLine].self, forKey: .lines)
         usageMinutes = try c.decodeIfPresent(Double.self, forKey: .usageMinutes) ?? 0
+        usageImages = try c.decodeIfPresent(Int.self, forKey: .usageImages) ?? 0
         usageCents = try c.decodeIfPresent(Int.self, forKey: .usageCents) ?? 0
     }
 }
@@ -562,6 +624,69 @@ public struct ModeInfo: Codable, Hashable, Sendable, Identifiable {
     public var description: String
 }
 
+/// An image output format the service offers.
+public struct ImageFormatInfo: Codable, Hashable, Sendable, Identifiable {
+    public var id: ImageFormat
+    public var name: String
+    public var isDefault: Bool
+    /// Takes `ImageSettings.quality`.
+    public var lossy: Bool
+    /// Can be lossless (PNG always, WebP with `ImageSettings.lossless`).
+    public var lossless: Bool
+    /// Keeps transparency.
+    public var alpha: Bool
+    /// The quality used when `ImageSettings.quality` is nil; lossy formats only.
+    public var defaultQuality: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case id, name, lossy, lossless, alpha
+        case isDefault = "default"
+        case defaultQuality = "default_quality"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(ImageFormat.self, forKey: .id)
+        name = try c.decodeIfPresent(String.self, forKey: .name) ?? id.rawValue.uppercased()
+        isDefault = try c.decodeIfPresent(Bool.self, forKey: .isDefault) ?? false
+        lossy = try c.decodeIfPresent(Bool.self, forKey: .lossy) ?? false
+        lossless = try c.decodeIfPresent(Bool.self, forKey: .lossless) ?? false
+        alpha = try c.decodeIfPresent(Bool.self, forKey: .alpha) ?? false
+        defaultQuality = try c.decodeIfPresent(Int.self, forKey: .defaultQuality)
+    }
+}
+
+/// Image output limits (`limits.image`).
+public struct ImageLimits: Codable, Hashable, Sendable {
+    /// The smallest rendition side.
+    public var minDimension: Int
+    /// The largest rendition side.
+    public var maxDimension: Int
+    /// The most files one job may make: stills × renditions × formats.
+    public var maxOutputs: Int
+    /// The most stills one video may give.
+    public var maxFrames: Int
+    /// The largest image input.
+    public var maxInputMegapixels: Double
+
+    enum CodingKeys: String, CodingKey {
+        case minDimension = "min_dimension"
+        case maxDimension = "max_dimension"
+        case maxOutputs = "max_outputs"
+        case maxFrames = "max_frames"
+        case maxInputMegapixels = "max_input_megapixels"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        minDimension = try c.decodeIfPresent(Int.self, forKey: .minDimension) ?? 16
+        maxDimension = try c.decodeIfPresent(Int.self, forKey: .maxDimension) ?? 8192
+        maxOutputs = try c.decodeIfPresent(Int.self, forKey: .maxOutputs) ?? 200
+        maxFrames = try c.decodeIfPresent(Int.self, forKey: .maxFrames) ?? 100
+        maxInputMegapixels = try c.decodeIfPresent(Double.self, forKey: .maxInputMegapixels) ?? 100
+    }
+}
+
 /// What the service can do: codecs, modes, filters, limits and the system presets.
 public struct Capabilities: Codable, Sendable {
     public var codecs: [CodecInfo]
@@ -574,11 +699,20 @@ public struct Capabilities: Codable, Sendable {
     public var inputContainers: [String]
     public var inputVideoCodecs: [String]
     public var inputAudioCodecs: [String]
+    /// Image output formats; empty when image output is unavailable or the server predates it.
+    public var imageFormats: [ImageFormatInfo]
+    /// Image inputs read: `jpeg`, `png`, `webp`, `avif`, `gif` (first frame), `tiff`, `bmp`, `heic`.
+    public var inputImageFormats: [String]
     public var limits: [String: JSONValue]
     public var systemPresets: [Preset]
 
+    /// `limits.image`; nil when the service does not list it.
+    public var imageLimits: ImageLimits? { try? limits["image"]?.decode(as: ImageLimits.self) }
+
     enum CodingKeys: String, CodingKey {
         case codecs, modes, audio, color, filters, limits
+        case imageFormats = "image_formats"
+        case inputImageFormats = "input_image_formats"
         case bitDepth = "bit_depth"
         case qualityTargets = "quality_targets"
         case inputContainers = "input_containers"
@@ -599,6 +733,8 @@ public struct Capabilities: Codable, Sendable {
         inputContainers = (try? c.decodeList([String].self, forKey: .inputContainers)) ?? []
         inputVideoCodecs = (try? c.decodeList([String].self, forKey: .inputVideoCodecs)) ?? []
         inputAudioCodecs = (try? c.decodeList([String].self, forKey: .inputAudioCodecs)) ?? []
+        imageFormats = (try? c.decodeList([ImageFormatInfo].self, forKey: .imageFormats)) ?? []
+        inputImageFormats = (try? c.decodeList([String].self, forKey: .inputImageFormats)) ?? []
         limits = (try? c.decodeMap([String: JSONValue].self, forKey: .limits)) ?? [:]
         systemPresets = (try? c.decodeList([Preset].self, forKey: .systemPresets)) ?? []
     }

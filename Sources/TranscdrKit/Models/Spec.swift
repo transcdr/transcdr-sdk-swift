@@ -10,7 +10,10 @@ public struct OutputMode: OpenEnum {
     /// The audio alone, as one file (label `audio`, width and height 0): an `.mp3`, `.flac`
     /// or `.m4a`, as `AudioSettings.container` picks.
     public static let audio: Self = "audio"
-    public static let all: [Self] = [.single, .hls, .audio]
+    /// Still images, of an image input or taken from a video: every rendition in every
+    /// format of `OutputSpec.image`.
+    public static let image: Self = "image"
+    public static let all: [Self] = [.single, .hls, .audio, .image]
 }
 
 public struct VideoCodec: OpenEnum {
@@ -162,13 +165,95 @@ public struct Orientation: OpenEnum {
     public static let all: [Self] = [.auto, .fixed]
 }
 
+/// An image output format.
+public struct ImageFormat: OpenEnum {
+    public let rawValue: String
+    public init(rawValue: String) { self.rawValue = rawValue }
+    /// The default and the smallest.
+    public static let avif: Self = "avif"
+    public static let webp: Self = "webp"
+    public static let jpeg: Self = "jpeg"
+    /// Always lossless.
+    public static let png: Self = "png"
+    public static let all: [Self] = [.avif, .webp, .jpeg, .png]
+
+    /// Takes `ImageSettings.quality`: AVIF, WebP and JPEG.
+    public var isLossy: Bool { self == .avif || self == .webp || self == .jpeg }
+}
+
+/// A video input's stills in an image job: at `atSeconds`, or `count` evenly spaced. Set
+/// one; neither is one frame 10% of the way in. An image input refuses `frames`.
+public struct ImageFrames: Codable, Hashable, Sendable {
+    /// Seconds from the start, 1–100 of them, each within the video.
+    public var atSeconds: [Double]?
+    /// 1–100 stills, evenly spaced through the video.
+    public var count: Int?
+
+    public init(atSeconds: [Double]? = nil, count: Int? = nil) {
+        self.atSeconds = atSeconds
+        self.count = count
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case count
+        case atSeconds = "at_seconds"
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encodeIfPresent(atSeconds, forKey: .atSeconds)
+        try c.encodeIfPresent(count, forKey: .count)
+    }
+}
+
+/// Image output, for mode `image` only: every rendition is made in every format.
+public struct ImageSettings: Codable, Hashable, Sendable {
+    /// 1–4 distinct formats; nil is `[.avif]`.
+    public var formats: [ImageFormat]?
+    /// 1–100, for the lossy formats; nil is each format's own default (AVIF 60, WebP 80,
+    /// JPEG 82).
+    public var quality: Int?
+    /// Lossless WebP. Only with `webp` and `png` (PNG always is).
+    public var lossless: Bool?
+    /// Keep the source's colour profile instead of converting to sRGB. EXIF, XMP and GPS
+    /// are never kept.
+    public var keepColorProfile: Bool?
+    /// A video input's stills.
+    public var frames: ImageFrames?
+
+    public init(
+        formats: [ImageFormat]? = nil, quality: Int? = nil, lossless: Bool? = nil, keepColorProfile: Bool? = nil,
+        frames: ImageFrames? = nil
+    ) {
+        self.formats = formats
+        self.quality = quality
+        self.lossless = lossless
+        self.keepColorProfile = keepColorProfile
+        self.frames = frames
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case formats, quality, lossless, frames
+        case keepColorProfile = "keep_color_profile"
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encodeIfPresent(formats, forKey: .formats)
+        try c.encodeIfPresent(quality, forKey: .quality)
+        try c.encodeIfPresent(lossless, forKey: .lossless)
+        try c.encodeIfPresent(keepColorProfile, forKey: .keepColorProfile)
+        try c.encodeIfPresent(frames, forKey: .frames)
+    }
+}
+
 /// One output. `width` × `height` is the largest it may be: the video keeps its
 /// shape inside that box (see `OutputSpec.fit`) and is not enlarged past its own
 /// size unless `upscale` is on. Each output reports the size it came out at.
 public struct Rendition: Codable, Hashable, Sendable {
-    /// The maximum width; even, 64–7680.
+    /// The maximum width; even, 64–7680. Mode `image`: 16–8192, odd sizes allowed.
     public var width: Int
-    /// The maximum height; even, 64–4320.
+    /// The maximum height; even, 64–4320. Mode `image`: 16–8192, odd sizes allowed.
     public var height: Int
     /// This rendition's constant bitrate under `cbr`, e.g. `"3M"` or `"800k"`;
     /// nil takes `quality.bitrate` or the default for its size.
@@ -344,6 +429,8 @@ public struct OutputSpec: Codable, Hashable, Sendable {
     public var maxFps: Double?
     public var filters: String?
     public var trim: Trim?
+    /// Mode `image` only: the formats, quality and, for a video input, which stills.
+    public var image: ImageSettings?
     /// Fields to send as explicit `null` (overrides only).
     public var clear: Set<Field> = []
 
@@ -353,14 +440,14 @@ public struct OutputSpec: Codable, Hashable, Sendable {
         case audio, subtitles, color
         case bitDepth = "bit_depth"
         case maxFps = "max_fps"
-        case filters, trim
+        case filters, trim, image
     }
 
     public init(
         mode: OutputMode? = nil, codec: VideoCodec? = nil, renditions: [Rendition]? = nil, ladder: Ladder? = nil,
         quality: Quality? = nil, gop: Int? = nil, segmentSeconds: Double? = nil, audio: AudioSettings? = nil,
         subtitles: String? = nil, color: ColorPolicy? = nil, bitDepth: BitDepth? = nil, maxFps: Double? = nil,
-        filters: String? = nil, trim: Trim? = nil, fit: Fit? = nil, upscale: Bool? = nil
+        filters: String? = nil, trim: Trim? = nil, fit: Fit? = nil, upscale: Bool? = nil, image: ImageSettings? = nil
     ) {
         self.mode = mode
         self.codec = codec
@@ -378,6 +465,7 @@ public struct OutputSpec: Codable, Hashable, Sendable {
         self.maxFps = maxFps
         self.filters = filters
         self.trim = trim
+        self.image = image
     }
 
     public init(from decoder: Decoder) throws {
@@ -398,6 +486,7 @@ public struct OutputSpec: Codable, Hashable, Sendable {
         maxFps = try c.decodeIfPresent(Double.self, forKey: .maxFps)
         filters = try c.decodeIfPresent(String.self, forKey: .filters)
         trim = try c.decodeIfPresent(Trim.self, forKey: .trim)
+        image = try c.decodeIfPresent(ImageSettings.self, forKey: .image)
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -421,6 +510,7 @@ public struct OutputSpec: Codable, Hashable, Sendable {
         try put(maxFps, .maxFps)
         try put(filters, .filters)
         try put(trim, .trim)
+        try put(image, .image)
     }
 
     /// Whether nothing is set (an empty override).
@@ -428,7 +518,7 @@ public struct OutputSpec: Codable, Hashable, Sendable {
         self == OutputSpec() || (clear.isEmpty && mode == nil && codec == nil && renditions == nil && fit == nil
             && upscale == nil && ladder == nil
             && quality == nil && gop == nil && segmentSeconds == nil && audio == nil && subtitles == nil
-            && color == nil && bitDepth == nil && maxFps == nil && filters == nil && trim == nil)
+            && color == nil && bitDepth == nil && maxFps == nil && filters == nil && trim == nil && image == nil)
     }
 
     public static func == (a: OutputSpec, b: OutputSpec) -> Bool {
@@ -436,13 +526,13 @@ public struct OutputSpec: Codable, Hashable, Sendable {
             && a.upscale == b.upscale && a.ladder == b.ladder
             && a.quality == b.quality && a.gop == b.gop && a.segmentSeconds == b.segmentSeconds && a.audio == b.audio
             && a.subtitles == b.subtitles && a.color == b.color && a.bitDepth == b.bitDepth && a.maxFps == b.maxFps
-            && a.filters == b.filters && a.trim == b.trim && a.clear == b.clear
+            && a.filters == b.filters && a.trim == b.trim && a.image == b.image && a.clear == b.clear
     }
 
     public func hash(into h: inout Hasher) {
         h.combine(mode); h.combine(codec); h.combine(renditions); h.combine(ladder); h.combine(quality)
         h.combine(gop); h.combine(segmentSeconds); h.combine(audio); h.combine(subtitles); h.combine(color)
-        h.combine(bitDepth); h.combine(maxFps); h.combine(filters); h.combine(trim); h.combine(clear)
+        h.combine(bitDepth); h.combine(maxFps); h.combine(filters); h.combine(trim); h.combine(image); h.combine(clear)
     }
 }
 

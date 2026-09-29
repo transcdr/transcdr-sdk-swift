@@ -72,6 +72,7 @@ public enum SpecTools {
         if audio.container?.rawValue == "mp4" { audio.container = .m4a }
         out.audio = audio
         if out.mode != .hls { out.segmentSeconds = nil }
+        if out.mode != .image { out.image = nil }
         out.subtitles = trimmed(out.subtitles)
         out.filters = trimmed(out.filters)
         if let trim = out.trim {
@@ -91,15 +92,28 @@ public enum SpecTools {
             let t = target[key] ?? .null
             let f = from[key] ?? .null
             guard t != f else { continue }
-            if key == "quality" || key == "audio", var patch = t.objectValue, let old = f.objectValue {
-                // Nested objects merge on the server: a key removed here must be cleared.
-                for k in old.keys where patch[k] == nil { patch[k] = .null }
-                out[key] = .object(patch)
+            if key == "quality" || key == "audio" || key == "image" {
+                out[key] = mergePatch(t, over: f)
             } else {
                 out[key] = t
             }
         }
         return OutputSpecInput(json: .object(out))
+    }
+
+    /// `new` as a patch over `old`: nested objects merge on the server, so a key removed
+    /// here must be cleared, at every level (`image.frames` switching from `count` to
+    /// `at_seconds` clears `count`).
+    private static func mergePatch(_ new: JSONValue, over old: JSONValue) -> JSONValue {
+        guard var patch = new.objectValue, let before = old.objectValue else { return new }
+        for (k, v) in before {
+            if let n = patch[k] {
+                if n.objectValue != nil, v.objectValue != nil { patch[k] = mergePatch(n, over: v) }
+            } else {
+                patch[k] = .null
+            }
+        }
+        return .object(patch)
     }
 
     /// `800k` → 800000, `3M` → 3000000; nil when unreadable.
@@ -236,6 +250,28 @@ public enum SpecTools {
         return "\(shortSide(r))p"
     }
 
+    /// An image rendition's name before it is made: its label, else its box, `1920x1080`.
+    /// (Its files are named by the size it comes out at.)
+    public static func effectiveImageLabel(_ r: Rendition) -> String {
+        if let label = r.label, !label.isEmpty { return label }
+        return "\(r.width)x\(r.height)"
+    }
+
+    /// An image rendition's sides, in pixels; odd sizes are fine.
+    public static let imageDimensions = 16...8192
+    /// The most files one image job may make: stills × renditions × formats.
+    public static let maxImageOutputs = 200
+    /// The most stills one video may give.
+    public static let maxFrames = 100
+
+    /// The files an image spec makes: stills × renditions (none is one, at the source's
+    /// size) × formats.
+    public static func imageOutputCount(_ spec: OutputSpec) -> Int {
+        let image = spec.image ?? ImageSettings()
+        let frames = image.frames.map { $0.atSeconds?.count ?? $0.count ?? 1 } ?? 1
+        return frames * max(1, spec.renditions?.count ?? 0) * max(1, image.formats?.count ?? 1)
+    }
+
     /// Errors keyed by the contract's dotted param (`output.renditions.0.width`),
     /// with the server's rules.
     public static func validate(_ input: OutputSpec, maxShortSide: Int = 4320) -> [String: String] {
@@ -265,9 +301,42 @@ public enum SpecTools {
             }
             if s.trim != nil { set("trim", "A trim is not available for audio-only output.") }
         }
+        if s.mode == .image {
+            // Image output makes still images.
+            let q = s.quality
+            let video: [(String, Bool)] = [
+                ("ladder", s.ladder != nil),
+                ("quality", q?.target != nil || q?.crf != nil || q?.bitrate != nil || q?.bufferMs != nil),
+                ("gop", s.gop != nil),
+                ("codec", (s.codec ?? .av1) != .av1),
+                ("color", (s.color ?? .sdr) != .sdr),
+                ("bit_depth", (s.bitDepth ?? .auto) != .auto),
+                ("max_fps", s.maxFps != nil),
+                ("filters", s.filters != nil),
+                ("subtitles", s.subtitles != nil),
+                ("trim", s.trim != nil),
+                ("audio", (s.audio ?? AudioSettings(mode: .auto)) != AudioSettings(mode: .auto)),
+            ]
+            for (field, present) in video where present {
+                set(field, "Image output makes still images, so \(field) does not apply.")
+            }
+            validateImage(s, set)
+        } else if input.image != nil {
+            set("image", "image applies only to mode \"image\".")
+        }
         let renditions = s.mode == .audio ? [] : (s.renditions ?? [])
         if renditions.count > 8 { set("renditions", "At most 8 renditions are allowed.") }
-        for (i, r) in renditions.enumerated() {
+        for (i, r) in renditions.enumerated() where s.mode == .image {
+            let at = { (f: String) in "renditions.\(i).\(f)" }
+            for (field, side) in [("width", r.width), ("height", r.height)] where !imageDimensions.contains(side) {
+                set(at(field), "An image rendition's \(field) must be between 16 and 8192.")
+            }
+            if r.bitrate != nil { set(at("bitrate"), "An image rendition has no bitrate.") }
+            if let l = r.label, l.range(of: "^[A-Za-z0-9_-]{1,32}$", options: .regularExpression) == nil {
+                set(at("label"), "Labels are 1–32 characters of A–Z, a–z, 0–9, - and _.")
+            }
+        }
+        for (i, r) in renditions.enumerated() where s.mode != .image {
             let at = { (f: String) in "renditions.\(i).\(f)" }
             if r.width < 64 || r.width > 7680 { set(at("width"), "Width must be between 64 and 7680.") }
             else if r.width % 2 != 0 { set(at("width"), "Width and height must be even (4:2:0 chroma).") }
@@ -285,7 +354,7 @@ public enum SpecTools {
                 set(at("label"), "Labels are 1–32 characters of A–Z, a–z, 0–9, - and _.")
             }
         }
-        let labels = renditions.map(effectiveLabel)
+        let labels = renditions.map(s.mode == .image ? effectiveImageLabel : effectiveLabel)
         if Set(labels).count != labels.count { set("renditions", "Two renditions share a label; give them distinct labels.") }
         if let side = s.ladder?.maxShortSide, side < 64 || side > maxShortSide {
             set("ladder.max_short_side", "max_short_side must be between 64 and \(maxShortSide).")
@@ -387,10 +456,71 @@ public enum SpecTools {
         return errors
     }
 
+    /// The image settings' errors, with the server's messages.
+    private static func validateImage(_ s: OutputSpec, _ set: (String, String) -> Void) {
+        let image = s.image ?? ImageSettings()
+        let formats = image.formats ?? [.avif]
+        if formats.isEmpty || formats.count > ImageFormat.all.count {
+            set("image.formats", "Give one to four formats: avif, webp, jpeg, png.")
+        }
+        for (i, f) in formats.enumerated() where formats[..<i].contains(f) {
+            set("image.formats", "\(f.rawValue) is listed twice.")
+        }
+        let lossless = image.lossless == true
+        if lossless, let f = formats.first(where: { $0 != .webp && $0 != .png }) {
+            set("image.lossless", "lossless applies to webp (png is always lossless); \(f.rawValue) has no lossless form.")
+        }
+        if let quality = image.quality {
+            if !(1...100).contains(quality) {
+                set("image.quality", "quality must be between 1 and 100.")
+            } else if !formats.contains(where: { $0.isLossy && !(lossless && $0 == .webp) }) {
+                set("image.quality", "quality applies to lossy formats (avif, webp, jpeg), and none is being made.")
+            }
+        }
+        if let frames = image.frames {
+            switch (frames.atSeconds, frames.count) {
+            case (.some, .some):
+                set("image.frames", "Give at_seconds or count, not both.")
+            case (.some(let at), nil):
+                if at.isEmpty || at.count > maxFrames {
+                    set("image.frames.at_seconds", "at_seconds takes between 1 and \(maxFrames) times.")
+                } else if at.contains(where: { !$0.isFinite || $0 < 0 }) {
+                    set("image.frames.at_seconds", "at_seconds are seconds from the start: zero or more.")
+                }
+            case (nil, .some(let n)) where n < 1 || n > maxFrames:
+                set("image.frames.count", "count must be between 1 and \(maxFrames).")
+            default:
+                break
+            }
+        }
+        let outputs = imageOutputCount(s)
+        if outputs > maxImageOutputs {
+            set("image", "This makes \(outputs) files (frames × renditions × formats); at most \(maxImageOutputs) are allowed.")
+        }
+    }
+
     /// `HLS · AV1 · ladder ≤ 1080p · standard`, or under constant bit rate
-    /// `HLS · H.264 · 1080p / 720p · CBR 5 / 3 Mb/s`.
+    /// `HLS · H.264 · 1080p / 720p · CBR 5 / 3 Mb/s`, or for images
+    /// `Images · AVIF / JPEG · 1920x1920 / small · 12 frames`.
     public static func describe(_ spec: OutputSpec?) -> String {
         guard let spec else { return "—" }
+        if spec.mode == .image {
+            let image = spec.image ?? ImageSettings()
+            var parts = ["Images", (image.formats ?? [.avif]).map { $0.rawValue.uppercased() }.joined(separator: " / ")]
+            if let r = spec.renditions, !r.isEmpty {
+                parts.append(r.map(effectiveImageLabel).joined(separator: " / "))
+            } else {
+                parts.append("source size")
+            }
+            if let fit = spec.fit, fit != .contain { parts.append(fit.rawValue) }
+            if let quality = image.quality { parts.append("quality \(quality)") }
+            if image.lossless == true { parts.append("lossless") }
+            if let frames = image.frames {
+                let n = frames.atSeconds?.count ?? frames.count ?? 1
+                parts.append(n == 1 ? "1 frame" : "\(n) frames")
+            }
+            return parts.joined(separator: " · ")
+        }
         if spec.mode == .audio {
             var parts = ["\(codecName(audioCodec(spec) ?? .mp3)) audio"]
             if let file = audioContainer(spec), file != .mp3 { parts.append(".\(file.rawValue)") }
@@ -521,7 +651,16 @@ public enum Catalog {
         side <= 576 ? .sd : side <= 1440 ? .hd : .uhd
     }
 
-    public static let tierLabels: [Tier: String] = [.sd: "SD (≤ 576p)", .hd: "HD (≤ 1440p)", .uhd: "UHD (> 1440p)"]
+    public static let tierLabels: [Tier: String] = [
+        .sd: "SD (≤ 576p)", .hd: "HD (≤ 1440p)", .uhd: "UHD (> 1440p)",
+        .upTo1mp: "Image (≤ 1 MP)", .upTo4mp: "Image (≤ 4 MP)", .over4mp: "Image (> 4 MP)",
+    ]
+
+    /// Tier of an output image by its pixel count.
+    public static func imageTier(width: Int, height: Int) -> Tier {
+        let pixels = width * height
+        return pixels <= 1_000_000 ? .upTo1mp : pixels <= 4_000_000 ? .upTo4mp : .over4mp
+    }
 
     /// Fallback rates (dollars per output minute) when the API has not said.
     public static let rates = (sd: 0.005, hd: 0.01, uhd: 0.025)

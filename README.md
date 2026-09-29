@@ -84,7 +84,7 @@ _ = try await client.presets.replace(presetId, .init(name: "Web 1080p", output: 
 ```
 
 Every preset has a `category` (`.web`, `.mobile`, `.streaming`, `.tv`,
-`.social`, `.audio`, `.archive`) and a `compatibility` list of the platforms
+`.social`, `.audio`, `.archive`, `.image`) and a `compatibility` list of the platforms
 its output plays on (`.web`, `.ios`, `.android`, `.smartTV`, `.legacy`,
 `.editing`). Each platform has a note giving minimum versions and conditions,
 such as audio that has to be AAC in the source. Both are derived from the
@@ -188,6 +188,59 @@ tells a session from an API key.
 
 Errors are `TranscdrError`, with `kind`, `status`, `code`, `param` and
 `fieldErrors` for validation failures.
+
+### Image jobs
+
+`mode: .image` makes still images, of an image input (JPEG, PNG, WebP, AVIF,
+GIF, TIFF, BMP, HEIC) or taken from a video. Every rendition is made in every
+format of `ImageSettings.formats`: `.avif` (the default), `.webp`, `.jpeg` and
+`.png`, one to four of them. Image renditions are 16 to 8192 on a side, odd
+sizes allowed, and fit as video renditions do.
+
+- `quality` (1 to 100) applies to the lossy formats; nil is each one's own
+  default (AVIF 60, WebP 80, JPEG 82). `lossless: true` makes WebP lossless;
+  PNG always is.
+- Outputs are upright, sRGB unless `keepColorProfile: true`, and never carry
+  EXIF, XMP or GPS.
+- From a video, `frames` picks the stills: `ImageFrames(atSeconds: [1.5, 10])`
+  or `ImageFrames(count: 12)` evenly spaced. Nil is one frame 10% of the way in.
+- Each `JobOutput` carries its `format`, its `rendition`, and for a video's
+  stills its `frame` (from 1) and `atSeconds`.
+- Images are billed per output image by the pixels it came out at:
+  `billing.billableImages` counts them and `billing.tier` is `.upTo1mp`,
+  `.upTo4mp` or `.over4mp` (`Tier.imageTiers`). The prices are `imageRates`
+  on a `Plan` and on `Billing`.
+
+`SpecTools.validate` checks image specs with the server's messages too.
+
+```swift
+// A photo as AVIF with a JPEG fallback, at two sizes.
+let photo = OutputSpec(
+    mode: .image,
+    renditions: [Rendition(width: 1920, height: 1920), Rendition(width: 640, height: 640, label: "small")],
+    image: ImageSettings(formats: [.avif, .jpeg], quality: 70)
+)
+let job = try await client.jobs.create(.init(input: .asset(asset.id), output: OutputSpecInput(photo)))
+
+// Twelve evenly spaced JPEG stills of a video.
+let stills = OutputSpec(
+    mode: .image,
+    renditions: [Rendition(width: 480, height: 270)],
+    image: ImageSettings(formats: [.jpeg], frames: ImageFrames(count: 12))
+)
+
+let done = try await client.jobs.waitFor(job.id)
+for output in done.outputs {
+    print(output.rendition ?? "", output.format?.rawValue ?? "", output.url)
+}
+print(done.billing?.billableImages ?? 0, done.billing?.tier?.rawValue ?? "")
+```
+
+Image system presets (category `.image`): `web-avif` and `web-webp` (1920,
+1280 and 640 wide), `thumbnail-jpeg`, `png-lossless`, `video-poster` (AVIF and
+JPEG of the frame 10% in) and `contact-sheet` (12 evenly spaced JPEG stills of
+a video). `Capabilities` lists the `imageFormats`, the `inputImageFormats` and
+`imageLimits`.
 
 ## Requirements
 
